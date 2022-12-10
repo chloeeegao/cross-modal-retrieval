@@ -13,6 +13,8 @@ def get_args():
     parser.add_argument('--save_dir', type=str,
                         required=False,
                         help='Path to store checkpoints.')
+    parser.add_argument('--date', type=str, required=False,
+                        help='current date')
     parser.add_argument('--root', type=str,
                         required=False,
                         help='Dataset path.')
@@ -27,7 +29,7 @@ def get_args():
                         default='StepLR',
                         help='Learning rate scheduler',
                         choices=['ReduceLROnPlateau', 'ExponentialLR', 'StepLR'])
-    parser.add_argument('--backbone', type=str, default='resnet50',
+    parser.add_argument('--backbone', type=str, default='vit_base_patch16_224',
                         choices=['resnet18', 'resnet50',
                                  'resnet101', 'resnet152', 'resnext50_32x4d',
                                  'resnext101_32x8d', 'inception_v3',
@@ -39,12 +41,14 @@ def get_args():
                                  'recall_5',
                                  'recall_10'],
                         help='Early stopping metric to monitor during training.')
-    parser.add_argument('--n_epochs', type=int, default=100,
+    parser.add_argument('--n_epochs', type=int, default=30,
                         help='Maximum number of epochs.')
     parser.add_argument('--tf_n_heads', type=int, default=4,
                         help='Number of attention heads in Transformer models.')
     parser.add_argument('--tf_n_layers', type=int, default=2,
                         help='Number of layers in Transformer models.')
+    parser.add_argument('--word_initial', type=str, default='scratch',
+                       help='word embedding initialization')
     parser.add_argument('--hidden_recipe', type=int, default=512,
                         help='Embedding dimensionality for recipe representation.')
     parser.add_argument('--output_size', type=int, default=1024,
@@ -67,10 +71,10 @@ def get_args():
                             stopping (-1 will train forever).')
     parser.add_argument('--lr_decay_factor', type=float, default=0.1,
                         help='Learning rate decay factor.')
-    parser.add_argument('--lr_decay_patience', type=int, default=30,
+    parser.add_argument('--lr_decay_patience', type=int, default=10,
                         help='Number of epochs with no improvement to wait in order to reduce learning rate.')
-
-
+    parser.add_argument('--output_dir', type=str, default='./log')
+    
     # flags - training
     parser.add_argument('--freeze_backbone', dest='freeze_backbone', action='store_true',
                         help='If used, the backbone weights will be frozen.')

@@ -1,2 +1,13 @@
 model/
 *.model
+log/
+__pycache__
+.ipynb_checkpoints
+*.ipynb
+cooking_action.py
+data/
+output/
+pretrained_model/
+result/
+*.pkl
+*.gz
