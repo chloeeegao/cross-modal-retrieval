@@ -3,52 +3,46 @@ import random
 from collections import defaultdict
 import numpy as np
 import pickle
-from spacy import vocab
 import torch
 import torch.backends.cudnn as cudnn
 from torch import nn
 from torch.cuda.amp import GradScaler, autocast
-import gc
 from torch.utils.tensorboard import SummaryWriter
-
 from dataloader import get_loader
 from config import get_args
-from joint_embedding import get_model
+from model import get_model
 from eval import computeAverageMetrics
-from utiliz import *
-from loss import TripletLoss
+from utils.utils import *
+from utils.loss import TripletLoss
+from utils.logger import setup_logger
 
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 MAP_LOC = None if torch.cuda.is_available() else 'cpu'
 
-
-
 def trainIter(args, split, loader, model, optimizer,
               loss_function, scaler, metrics_epoch):
     
     with autocast():
-        _, recipe, img = loader.next()
+        _, title, act_ing, img = next(loader)
 
         img = img.to(device) if img is not None else None
-        recipe = recipe.to(device)
+        title = title.to(device)
+        act_ing= act_ing.to(device)
 
         if split=='val':
             with torch.no_grad():
-                img_feat, recipe_feat = model(img, recipe)
+                img_feat, recipe_feat = model(title, act_ing, img)
         else:
-            img_feat, recipe_feat = model(img, recipe, freeze_backbone= args.freeze_backbone)
+            img_feat, recipe_feat = model(title, act_ing, img, freeze_backbone= args.freeze_backbone)
 
+        # loss_paired = 0
+        # # if img is not None:
+        #     loss_paired = loss_function(img_feat, recipe_feat)
+        #     metrics_epoch['loss_paired'].append(loss_paired.item())
 
-        loss_paired = 0
-
-        if img is not None:
-            loss_paired = loss_function(img_feat, recipe_feat)
-            metrics_epoch['loss_paired'].append(loss_paired.item())
-
-        loss = loss_paired
+        loss = loss_function(img_feat, recipe_feat)
         metrics_epoch['loss'].append(loss.item())
-
 
     if split == 'train':
         scaler.scale(loss).backward()
@@ -68,15 +62,14 @@ def train(args):
     checkpoints_dir = os.path.join(args.save_dir, args.model_name)
     make_dir(checkpoints_dir)
 
-
     if args.tensorboard:
-        logger = SummaryWriter(checkpoints_dir)
+        writter = SummaryWriter(checkpoints_dir)    
 
     loaders = {}
 
     if args.resume_from != '':
         print('resuming from checkpoint:', args.resume_from)
-        vars_to_replace = ['batch size', 'tensorboard', 'model_name',
+        vars_to_replace = ['batch_size', 'tensorboard', 'model_name',
                             'lr', 'scale_lr', 'freeze_backbone',
                             'load_optimizer']
 
@@ -105,7 +98,8 @@ def train(args):
         loader, dataset = get_loader(args.root, args.batch_size,
                             args.resize, args.imsize, augment=True,
                             split=split, mode=split)
-        print('dataset:', len(dataset))
+        # print('dataset:', len(dataset))
+        logger.info(split+' dataset = %d', len(dataset))
         loaders[split] = loader
 
 
@@ -115,10 +109,11 @@ def train(args):
 
     params_backbone = list(model.image_encoder.backbone.parameters())
     params_fc = list(model.image_encoder.fc.parameters()) \
-                    + list(model.recipe_encoder.parameters())
+                    + list(model.recipe_encoder.parameters())\
+                    + list(model.merge_recipe.parameters())
 
-    print("recipe encoder", count_parameters(model.recipe_encoder))
-    print("image encoder", count_parameters(model.image_encoder))
+    logger.info("recipe encoder = %d", count_parameters(model.recipe_encoder))
+    logger.info("image encoder = %d", count_parameters(model.image_encoder))
 
     optimizer = get_optimizer(params_fc,
                               params_backbone,
@@ -136,9 +131,8 @@ def train(args):
     ngpus = 1
     if device != 'cpu' and torch.cuda.device_count() > 1:
         ngpus = torch.cuda.device_count()
-        model = nn.DataParallel(model, device_ids=[0])
+        model = nn.DataParallel(model)
 
-    torch.cuda.set_device(0)    
     model = model.to(device)
 
     if device != 'cpu':
@@ -165,9 +159,8 @@ def train(args):
 
             total_step = len(loaders[split])
             loader = iter(loaders[split])
-            print('total step:', total_step)
+            logger.info('total step = %d', total_step)
             
-
 
             img_feats, recipe_feats = None, None
 
@@ -193,7 +186,7 @@ def train(args):
                         img_feats = img_feat
                         recipe_feats = recipe_feat
 
-                if not args.tensorboard and i != 0 and i % args.log_every == 0:
+                if i != 0 and i % args.log_every == 0: # not args.tensorboard and
                     # log metrics to stdout every few iterations
                     avg_metrics = {k: np.mean(v) for k, v in metrics_epoch.items() if v}
                     text_ = "split: {:s}, epoch [{:d}/{:d}], step [{:d}/{:d}]"
@@ -202,7 +195,7 @@ def train(args):
                         text_ += ", " + k + ": {:.4f}"
                         values.append(v)
                     str_ = text_.format(*values)
-                    print(str_)
+                    logger.info(str_)
 
             # computes retrieval metrics (average of 10 runs on 1k sized rankings)
             retrieval_metrics = computeAverageMetrics(img_feats, recipe_feats,
@@ -213,20 +206,20 @@ def train(args):
 
             avg_metrics = {k: np.mean(v) for k, v in metrics_epoch.items() if v}
             # log to stdout at the end of the epoch (for both train and val splits)
-            if not args.tensorboard:
-                text_ = "AVG. split: {:s}, epoch [{:d}/{:d}]"
-                values = [split, epoch, args.n_epochs]
-                for k, v in avg_metrics.items():
-                    text_ += ", " + k + ": {:.4f}"
-                    values.append(v)
-                str_ = text_.format(*values)
-                print(str_)
+            # if not args.tensorboard:
+            text_ = "AVG. split: {:s}, epoch [{:d}/{:d}]"
+            values = [split, epoch, args.n_epochs]
+            for k, v in avg_metrics.items():
+                text_ += ", " + k + ": {:.4f}"
+                values.append(v)
+            str_ = text_.format(*values)
+            logger.info(str_)
 
             # log to tensorboard at the end of one epoch
             if args.tensorboard:
                 # 1. Log scalar values (scalar summary)
                 for k, v in metrics_epoch.items():
-                    logger.add_scalar('{}/{}'.format(split, k), np.mean(v), epoch)
+                    writter.add_scalar('{}/{}'.format(split, k), np.mean(v), epoch)
 
         # monitor best loss value for early stopping
         # if the early stopping metric is recall (the higher the better),
@@ -245,8 +238,8 @@ def train(args):
                 scheduler.step()
 
         if curr_loss*mult < best_loss:
-            if not args.tensorboard:
-                print("Updating best checkpoint")
+            # if not args.tensorboard:
+            logger.info("Updating best checkpoint")
             save_model(model, optimizer, 'best', checkpoints_dir, ngpus)
             best_loss = curr_loss*mult
 
@@ -265,11 +258,14 @@ def train(args):
             break
 
     if args.tensorboard:
-        logger.close()
+        writter.close()
 
 
 def main():
     args = get_args()
+    global logger
+    make_dir(args.output_dir)
+    logger = setup_logger(args.model_name, args.output_dir, 0, filename=args.model_name+args.date+'log.txt')
     torch.manual_seed(1234)
     torch.cuda.manual_seed(1234)
     random.seed(1234)

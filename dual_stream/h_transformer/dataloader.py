@@ -1,41 +1,59 @@
-from subprocess import list2cmdline
 import torch
 import pickle
-from cooking_action import extract_action
 import os
 import random
-from utiliz import get_token_ids, list2Tensors
 random.seed(1234)
-from random import choice
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 import multiprocessing
 import torchvision.transforms as transforms
-import numpy as np
-
-
+from info_extraction import info_extract
+from utils.utils import get_token_ids, list2Tensors
 
 class Recipe1M(Dataset):
 
-    def __init__(self,root,transform=None, split='train'):
+    def __init__(self,root, transform=None, split='train'):
 
         self.data = pickle.load(open(os.path.join(root,'traindata', split + '.pkl'), 'rb'))
-        self.valid_ingrd = pickle.load(open(os.path.join(root,'valid_ingredients.pkl'),'rb'))
-        self.vocab_inv = pickle.load(open('/data/s2478846/scripts/data/vocab.pkl','rb'))
-        self.vocab = {}
-
-        for k, v in self.vocab_inv.items():
-            if type(v) != str:
-                v = v[0]
-            self.vocab[v] = k
-
         self.root = root
         self.transform = transform
         self.split = split
         self.ids = list(self.data.keys())
+        self.max_ingrs = 20
+        # self.max_instrs = 20
+        self.max_seq_len = 15
 
+        self.vocab_inv = pickle.load(open(os.path.join(root,'vocab.pkl'),'rb'))
+        self.vocab = {}
+        for k, v in self.vocab_inv.items():
+            if type(v) != str:
+                v = v[0]
+            self.vocab[v] = k
+        
+        self.index_mapper = dict()
+        if self.split == 'train':
+            j = 0
+            for i, id in enumerate(self.ids):
+                img_list = self.data[id]['images']
+                if len(img_list)<=5:
+                    for img in img_list:
+                        self.index_mapper[j] = (id, img)
+                        j += 1
+                else:
+                    # random choose 5 images from img_list
+                    random_choie = random.sample(img_list, 5)
+                    for img in random_choie:
+                        self.index_mapper[j] = (id, img)
+                        j += 1
+        else:
+            for i, id in enumerate(self.ids):
+                img_list = self.data[id]['images']
+                # random choose 1 image from img_list
+                img = random.choice(img_list)
+                self.index_mapper[i] = (id, img)
+        
     def __len__(self):
-        return len(self.ids)
+        return len(self.index_mapper)
 
     def get_ids(self):
         return self.ids
@@ -46,31 +64,29 @@ class Recipe1M(Dataset):
         except:
             return None
 
-    def __getitem__(self, id):
-
-        entry = self.data[self.ids[id]]
-
-        if self.split == 'train':
-            img_name = choice(entry['images'])
-
-        else:
-            img_name = entry['images'][0]
+    def __getitem__(self, index):
+        
+        recipe_id, img_name = self.index_mapper[index]
+        entry = self.data[recipe_id]
 
         img_name = '/'.join(img_name[:4])+'/'+img_name
         img = Image.open(os.path.join(self.root, self.split, img_name))
         if self.transform is not None:
             img = self.transform(img)
-
-        # title = entry['title']
-        ingrs = self.valid_ingrd[self.ids[id]]
-        instrs = entry['instructions']
-
-        # extract action and corresponding ingredients
-    
-        action_ingrs = extract_action(ingrs, instrs)
-        recipe = list2Tensors(get_token_ids(action_ingrs, self.vocab))
-
-        return self.ids[id], recipe, img
+            
+        title = entry['title']
+        ingrs = entry['ingredients'][:self.max_ingrs]
+        # instrs = entry['instructions'][:self.max_instrs]
+        
+        action_ing = info_extract(recipe_id, entry)[:self.max_ingrs]
+        
+        title = torch.Tensor(get_token_ids(title, self.vocab)[:self.max_seq_len])
+        if len(action_ing) != 0:
+            extract_info = list2Tensors([get_token_ids(' '.join(sent), self.vocab)[:self.max_seq_len] for sent in action_ing])
+        else:
+            extract_info = list2Tensors([get_token_ids(ing, self.vocab)[:self.max_seq_len] for ing in ingrs])
+        
+        return recipe_id, title, extract_info, img
 
 
 def pad_input(input):
@@ -96,16 +112,17 @@ def pad_input(input):
 
 def collate_fn(data):
 
-    ids, recipe, image = zip(*data)
+    ids, title, act_ing, image = zip(*data)
 
     if image[0] is not None:
         image = torch.stack(image, 0)
     else:
         image = None
 
-    recipe_target = pad_input(recipe)
-
-    return ids, recipe_target, image
+    title = pad_input(title)
+    act_ing = pad_input(act_ing)
+    
+    return ids, title, act_ing, image
 
 def get_loader(root, batch_size, resize, im_size, split='train', 
                 mode='train', augment=True, drop_last=True):
@@ -131,5 +148,4 @@ def get_loader(root, batch_size, resize, im_size, split='train',
                         collate_fn=collate_fn, drop_last=drop_last)
 
     return loader, ds
-
 

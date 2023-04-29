@@ -4,14 +4,14 @@
 import os
 import multiprocessing
 from dataloader import get_loader
-from joint_embedding import get_model
+from model import get_model
 import torch.backends.cudnn as cudnn
 from config import get_args
 from tqdm import tqdm
 import torch
 import numpy as np
 import pickle
-from utiliz import load_checkpoint, count_parameters
+from utils import load_checkpoint, count_parameters
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 map_loc = None if torch.cuda.is_available() else 'cpu'
@@ -49,9 +49,8 @@ def test(args):
     model.load_state_dict(model_dict, strict=False)
 
     if device != 'cpu' and torch.cuda.device_count() > 1:
-        model = torch.nn.DataParallel(model,device_ids=[2])
+        model = torch.nn.DataParallel(model)
     
-    torch.cuda.set_device(2) 
     model = model.to(device)
     model.eval()
 
@@ -63,12 +62,13 @@ def test(args):
 
     for _ in tqdm(range(total_step)):
 
-        ids, recipe, img = loader.next()
+        ids, title, act_ing, img = loader.next()
 
         img = img.to(device)
-        recipe = recipe.to(device)
+        title = title.to(device)
+        act_ing = act_ing.to(device)
         with torch.no_grad():
-            out = model(img, recipe)
+            out = model(title, act_ing, img)
             f1, f2 = out
         allids.extend(ids)
         if all_f1 is not None:

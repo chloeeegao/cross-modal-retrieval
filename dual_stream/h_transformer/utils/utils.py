@@ -99,24 +99,17 @@ def load_checkpoint(checkpoints_dir, suff, map_loc, vars_to_replace):
     return args, model_state_dict, opt_state_dict
 
 
-def get_token_ids(action_dict, vocab):
+def get_token_ids(sentence, vocab):
     tok_ids = []
-    for key, value in action_dict.items():
-        token_ids = []
-        token_ids.append(vocab['<start>'])
-        try:
-            token_ids.append(vocab[key])
-        except KeyError:
-            token_ids.append(vocab['<unk>'])
-        for item in value:
-            try:
-                token_ids.append(vocab[item])
-            except KeyError:
-                token_ids.append(vocab['<unk>'])
-        token_ids.append(vocab['<end>'])
-        tok_ids.append(token_ids[:15]) # max 10 ingredients per action
-
-    return tok_ids[:15]
+    tokens = nltk.tokenize.word_tokenize(sentence.lower())
+    tok_ids.append(vocab['<start>'])
+    for token in tokens:
+        if token in vocab:
+            tok_ids.append(vocab[token])
+        else:
+            tok_ids.append(vocab['<unk>'])
+    tok_ids.append(vocab['<end>'])
+    return tok_ids
 
 
 def list2Tensors(input_list):
