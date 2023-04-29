@@ -1,29 +1,10 @@
 import json
 import os
-<<<<<<< HEAD
-=======
-import re
->>>>>>> f33cf02af7e27b2fac9a1ac5ff2a8061ca0d7c3c
 import copy
 import pickle
 import argparse
 import logging
 from logging import FileHandler
-<<<<<<< HEAD
-=======
-import word2vec
-
-
-
-w2v_file = '/data/s2478846/data/vocab.bin'
-if not os.path.exists(os.path.join(os.path.dirname(w2v_file),'vocab.txt')):
-    model = word2vec.load(w2v_file)
-    vocab = model.vocab # len(vocab) 30167
-    print("Writing to %s..." % os.path.join(os.path.dirname(w2v_file),'vocab.txt'))
-    f = open(os.path.join(os.path.dirname(w2v_file),'vocab.txt'),'w')
-    f.write("\n".join(vocab))
-    f.close()
->>>>>>> f33cf02af7e27b2fac9a1ac5ff2a8061ca0d7c3c
 
 
 parser = argparse.ArgumentParser(description='preprocessing parameters')
@@ -93,10 +74,6 @@ def detect_ingrs(recipe, vocab):
     return list(detected) + [vocab['</i>']]
 
 
-<<<<<<< HEAD
-=======
-
->>>>>>> f33cf02af7e27b2fac9a1ac5ff2a8061ca0d7c3c
 print('Loading dataset.')
 DATASET = '/data/s2478846/data'
 dataset = Layer.merge([Layer.L1, Layer.L2, Layer.INGRS],DATASET)
@@ -133,12 +110,7 @@ else:
     
     logger = logging.getLogger('bigrams')
     logger.setLevel(logging.DEBUG)
-<<<<<<< HEAD
     filename = 'bigrams_output.txt'
-=======
-    # logging.basicConfig(filename='./class.log', level=logging.DEBUG)
-    filename = 'log.txt'
->>>>>>> f33cf02af7e27b2fac9a1ac5ff2a8061ca0d7c3c
     fh = FileHandler(filename)
     fh.setLevel(logging.DEBUG)
     logger.addHandler(fh)
@@ -168,15 +140,10 @@ else:
         ingr_detections = detect_ingrs(entry, ingr_vocab)
         ningrs = len(ingr_detections)
         ningrs_list.append(ningrs)
-<<<<<<< HEAD
     
 
     # load bigrams
     logger.info("loading bigrams")
-=======
-
-    # load bigrams
->>>>>>> f33cf02af7e27b2fac9a1ac5ff2a8061ca0d7c3c
     fdist = pickle.load(open('../data/bigrams'+params.suffix+'.pkl','rb'))
     Nmost = fdist.most_common(N)
 
@@ -200,11 +167,7 @@ else:
             title = entry['title'].lower()
             id = entry['id']
 
-<<<<<<< HEAD
             if query in title and ninstrs < params.maxlen and imgs and ningrs<params.maxlen and ningrs > 0: # if match, add class to id
-=======
-            if query in title and ninstrs < params.maxlen and imgs and ningrs<params.maxlen and ningrs is not 0: # if match, add class to id
->>>>>>> f33cf02af7e27b2fac9a1ac5ff2a8061ca0d7c3c
                 # we only add if previous class was background
                 # or if there is no class for the id
                 if id in class_dict:
@@ -224,12 +187,8 @@ else:
 
         if counts['train'] > MIN_SAMPLES and counts['val'] > 0 and counts['test'] > 0:
             ind2class[n_class] = query
-<<<<<<< HEAD
             logger.info("{}, {}, {}".format(n_class, query, counts))
             print(n_class, query, counts)
-=======
-            logger.info("class_id:{}, class_name:{}, counts:{}".format(n_class, query, counts))
->>>>>>> f33cf02af7e27b2fac9a1ac5ff2a8061ca0d7c3c
             n_class+=1
         else:
             for id in matching_ids: # reset classes to background
@@ -237,25 +196,14 @@ else:
 
         if n_class > MAX_CLASSES:
             break
-<<<<<<< HEAD
     
     # get food101 categories (if not present)
     logger.info("loading food101")
-=======
-
-    # get food101 categories (if not present)
->>>>>>> f33cf02af7e27b2fac9a1ac5ff2a8061ca0d7c3c
     food101 = []
     with open(params.f101_cats,'r') as f_classes:
         for l in f_classes:
             cls = l.lower().rstrip().replace('_', ' ')
-<<<<<<< HEAD
             food101.append(cls)
-=======
-            # cls = l.lower().rstrip()
-            if cls not in queries:
-                food101.append(cls)
->>>>>>> f33cf02af7e27b2fac9a1ac5ff2a8061ca0d7c3c
 
     for query in food101:
         counts = {'train': 0, 'val': 0,'test':0}
@@ -268,11 +216,7 @@ else:
             title = entry['title'].lower()
             id = entry['id']
 
-<<<<<<< HEAD
             if query in title and ninstrs < params.maxlen and imgs and ningrs<params.maxlen and ningrs > 0: # if match, add class to id
-=======
-            if query in title and ninstrs < params.maxlen and imgs and ningrs<params.maxlen and ningrs is not 0: # if match, add class to id
->>>>>>> f33cf02af7e27b2fac9a1ac5ff2a8061ca0d7c3c
                 # we only add if previous class was background
                 # or if there is no class for the id
                 if id in class_dict:
@@ -291,26 +235,15 @@ else:
 
         if counts['train'] > MIN_SAMPLES and counts['val'] > 0 and counts['test'] > 0:
             ind2class[n_class] = query
-<<<<<<< HEAD
             logger.info("{}, {}, {}".format(n_class, query, counts))
-=======
->>>>>>> f33cf02af7e27b2fac9a1ac5ff2a8061ca0d7c3c
             print(n_class, query, counts)
             n_class+=1
         else:
             for id in matching_ids: # reset classes to background
                 class_dict[id] = 0
-<<<<<<< HEAD
                   
     ind2class[0] = 'background'
     print(len(ind2class))
     with open('../data/classes_'+params.suffix+'.pkl','wb') as f:
-=======
-
-
-    ind2class[0] = 'background'
-    print(len(ind2class))
-    with open('../data/classes'+params.suffix+'.pkl','wb') as f:
->>>>>>> f33cf02af7e27b2fac9a1ac5ff2a8061ca0d7c3c
         pickle.dump(class_dict,f)
         pickle.dump(ind2class,f)
