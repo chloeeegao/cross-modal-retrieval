@@ -11,7 +11,7 @@ import torch.distributed as dist
 
 # def ddp_setup(rank, world_size):
 os.environ['MASTER_ADDR'] = 'localhost'
-os.environ['MASTER_PORT'] = '12356'
+os.environ['MASTER_PORT'] = '12355'
 # os.environ['WORLD_SIZE'] = torch.cuda.device_count()
 # dist.init_process_group(backend='nccl', init_method="env://")
 

@@ -3,7 +3,7 @@ model/
 log/
 __pycache__
 .ipynb_checkpoints
-*.ipynb
+print.ipynb
 data/
 output/
 pretrained_model/
