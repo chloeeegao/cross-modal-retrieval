@@ -4,17 +4,12 @@ log/
 __pycache__
 .ipynb_checkpoints
 *.ipynb
-<<<<<<< HEAD
-=======
-cooking_action.py
->>>>>>> f33cf02af7e27b2fac9a1ac5ff2a8061ca0d7c3c
 data/
 output/
 pretrained_model/
 result/
 *.pkl
 *.gz
-<<<<<<< HEAD
 figures
 others
 preprecessing/image_classifier.py
@@ -23,5 +18,3 @@ preprecessing/image_classifier.py
 weights/
 *.ckpt
 food_entity_extractor
-=======
->>>>>>> f33cf02af7e27b2fac9a1ac5ff2a8061ca0d7c3c

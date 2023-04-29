@@ -1,5 +1,4 @@
-<<<<<<< HEAD
-# Cross-Modal Food Retrieval
+Cross-Modal Food Retrieval
 
 This is the master thesis under LIACS at Leiden University.  Recipe1M dataset was used in this work. Single-stream and dual-stream models for cross-modal representation were explored and experimented on the cross-modal retrieval task.
 
@@ -64,24 +63,3 @@ CUDA_VISIBLE_DEVICES=0,1 python single_stream/pretrain/main.py \
 ```
 
 ### Pretrained Models
-=======
-# cross-modal-retrieval
-
-This is a master thesis project under LIACS at Leiden University.
-
----
-
-This repo is organized as follows:
-
-* data:
-* transformers:
-* vlp_models:
-
-
-```
-
-
-
-
-```
->>>>>>> f33cf02af7e27b2fac9a1ac5ff2a8061ca0d7c3c
