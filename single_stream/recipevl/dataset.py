@@ -3,43 +3,51 @@ import torch
 import pickle
 import os
 import random
+import nltk
 from PIL import Image
-from collections import defaultdict
 from torch.utils.data import Dataset
-from module.info_extraction import info_extract
-# import multiprocessing
+from module import info_extraction
+# from module.utils import get_token_ids
+
+invisible_ing = ['salt', 'sugar', 'vinegar', 'pepper', 'powder', 'butter', 'flour', 
+                 'sauce', 'cumin', 'spice', 'oregano', 'rosemary','thyme', 'oil',
+                 'flakes', 'nutmeg', 'cayenne', 'cinnamon', 'cloves','garlic',
+                 'ginger', 'paprika', 'rub', 'blend', 'hickory', 'hanout', 'extract',
+                 'tamari', 'mesquite', 'seasoning']
 
 
 class Recipe1M(Dataset):
     
-    def __init__(self, args, tokenizer, transform=None, split='train', sample=1000):
+    def __init__(self, args, tokenizer, transforms=None, split='train', sample=1000):
         
         self.root = args.data_dir 
         self.data = pickle.load(open(os.path.join(self.root,'traindata', split + '.pkl'), 'rb'))
         self.tokenizer = tokenizer
-        self.transform = transform
+        self.transforms = transforms
         self.split = split
         self.max_seq_len = args.max_seq_len
         self.max_ingrs = 20
         self.max_instrs = 20
+        self.max_tags = 6
         self.sample = sample
         self.extract_info = args.extract_info
+        self.add_tags = args.add_tags
+        
+        # if self.tokenizer == None:
+        #     self.vocab_inv = pickle.load(open(os.path.join(self.root,'vocab.pkl'),'rb'))
+        #     self.vocab = {}
+        #     for k, v in self.vocab_inv.items():
+        #         if type(v) != str:
+        #             v = v[0]
+        #         self.vocab[v] = k
+                
+        if self.add_tags:
+            self.val_ing = pickle.load(open(os.path.join(self.root,'valid_ingredients.pkl'),'rb'))
+            with open(os.path.join(self.root, 'classes1M.pkl'),'rb') as f:
+                self.class_dict = pickle.load(f)
+                self.id2class = pickle.load(f)
         
         self.ids = list(self.data.keys())
-        
-        with open('/data/s2478846/data/classes1M.pkl','rb') as f:
-            self.class_dict = pickle.load(f)
-            self.id2class = pickle.load(f)
-        
-        self.class_id_dict = defaultdict(list)
-        for rep_id in self.data.keys():
-            class_id = self.class_dict[rep_id]
-            # if class_id > 0:
-            self.class_id_dict[class_id].append(rep_id)
-                
-        # self.ids = []
-        # for value in self.class_id_dict.values():
-        #     self.ids.extend(value)
         
         self.index_mapper = dict()
         if self.split == 'train':
@@ -78,17 +86,46 @@ class Recipe1M(Dataset):
 
     def get_ids(self):
         return self.ids
+    
+    def get_vocab_size(self):
+        return self.tokenizer.vocab_size
+  
         
     def get_image(self, img_name):
         img_path = '/'.join(img_name[:4])+'/'+ img_name
         img = Image.open(os.path.join(self.root, self.split, img_path))
-        if self.transform != None:
-            img = [self.transform(img)]
+        if self.transforms != None:
+            img = [self.transforms(img)]
             
         return {'img_name': img_name,
                 'image': img}
+       
     
-    
+    def get_object_tags(self, rep_id):
+         
+        tags = []
+        class_id = self.class_dict[rep_id]
+        if class_id != 0:
+            rep_class = self.id2class[class_id]
+            tags.append(rep_class)
+        ing_list = self.val_ing[rep_id].copy()
+        remove_list = []
+        for ing in ing_list:
+            words = nltk.tokenize.word_tokenize(ing)
+            for word in words:
+                if word in invisible_ing:
+                    remove_list.append(ing)  
+        # remove invisible ingredients
+        try:
+            for inv in remove_list:
+                ing_list.remove(inv)      
+        except ValueError:
+            pass
+        tags.extend(list(set(ing_list)))
+        object_tags = ' '.join(tags[:self.max_tags])
+        
+        return object_tags   
+       
     def get_text(self, rep_id):
         
         entry = self.data[rep_id]
@@ -98,86 +135,81 @@ class Recipe1M(Dataset):
         instructions = entry['instructions'][:self.max_instrs]
         
         if self.extract_info:
-            act_ing = info_extract(rep_id, entry)
+            act_ing = info_extraction.info_extract(rep_id, entry)
             txt = [' '.join(sent) for sent in act_ing]
-            # for sent in act_ing:
-            #     sent = ' '.join(sent)
-            #     txt.append(sent)
             act_ing_txt = '. '.join(txt)
-            text = title + act_ing_txt
+            text = title + '. ' + act_ing_txt
         else:
             ing_txt = '. '.join(ingredients)
             ins_txt = ' '.join(instructions)
-            text = title + ing_txt + ins_txt
+            text = title + '. ' + ing_txt + ins_txt
         
-        encoding = self.tokenizer(text, 
-                                  padding='max_length',
-                                  truncation = True,
-                                  max_length = self.max_seq_len,
-                                  return_special_tokens_mask = True)
-        
-        return {'rep_id': rep_id,
-                'text': (text, encoding)} 
+        return text 
         
     
-    def get_false_image(self, rep_id):
-        # food_class_id = self.class_dict[rep_id]
-        # food_class_list = self.class_id_dict[food_class_id]
+    # def get_false_image(self, rep_id):
+    #     ids_copy = self.ids.copy()
+    #     ids_copy.remove(rep_id)
+    #     neg_rep_id = random.choice(ids_copy)
+    #     neg_img_name = random.choice(self.data[neg_rep_id]['images'])
         
-        # food_class_list_copy = food_class_list.copy()
-        # food_class_list_copy.remove(rep_id)
-        # try:
-        #     neg_rep_id = random.choice(food_class_list_copy)
-        # except IndexError:
-        ids_copy = self.ids.copy()
-        ids_copy.remove(rep_id)
-        neg_rep_id = random.choice(ids_copy)
-        neg_img_name = random.choice(self.data[neg_rep_id]['images'])
+    #     neg_image = self.get_image(neg_img_name)
+    #     neg_img = neg_image['image']
         
-        neg_image = self.get_image(neg_img_name)
-        neg_img = neg_image['image']
-        
-        return {'neg_rep_id': neg_rep_id,
-                'neg_img_name': neg_img_name,
-                'neg_image': neg_img}
-        
-         
-    def get_false_text(self, rep_id):
-        food_class_id = self.class_dict[rep_id]
-        food_class_list = self.class_id_dict[food_class_id]
-        
-        food_class_list_copy = food_class_list.copy()
-        food_class_list_copy.remove(rep_id)
-        neg_rep_id = random.choice(food_class_list_copy)
-        neg_text = self.get_text(neg_rep_id)
-        neg_txt = neg_text['text']
-        
-        return {'neg_rep_id': neg_rep_id,
-                'neg_text': neg_txt}
+    #     return {'neg_rep_id': neg_rep_id,
+    #             'neg_img_name': neg_img_name,
+    #             'neg_image': neg_img}
         
     
     def __getitem__(self, index):
         rep_id, img_name = self.index_mapper[index]
-        
         ret = dict()
         ret['raw_index'] = index
         
-        txt = self.get_text(rep_id)
         img = self.get_image(img_name)
-        
-        ret.update(txt)
         ret.update(img)
         
+        text = self.get_text(rep_id)
         
-        neg_img = self.get_false_image(rep_id)
+        ids_copy = self.ids.copy()
+        ids_copy.remove(rep_id)
+        neg_rep_id = random.choice(ids_copy)     
+        
+        label = None
+        if self.extract_info and self.add_tags:
+            if self.split =='train' and random.random() <= 0.5:
+                neg_object_tags = self.get_object_tags(neg_rep_id)
+                text = text + '. ' + neg_object_tags
+                label = 0
+            else:
+                object_tags = self.get_object_tags(rep_id)
+                text = text + '. ' + object_tags
+                label = 1
+        ret.update({'label': label})
+        
+        # if self.tokenizer:
+        encoding = self.tokenizer(text, 
+                                    padding='max_length',
+                                    truncation = True,
+                                    max_length = self.max_seq_len)
+        # else:
+        #     input_ids = get_token_ids(text)
+        #     padding = (self.max_seq_len - len(input_ids)) * [0]
+        #     input_ids = input_ids + padding        
+        txt = {'rep_id': rep_id,
+                'text': (text, encoding)} 
+        ret.update(txt)
+        
+        neg_img_name = random.choice(self.data[neg_rep_id]['images'])
+        neg_image = self.get_image(neg_img_name)
+        neg_img =  {'neg_rep_id': neg_rep_id,
+                'neg_img_name': neg_img_name,
+                'neg_image': neg_image['image']}
+        
         ret.update(neg_img)
-        
-        # if self.split != 'train':
-        #     neg_txt = self.get_false_text(rep_id)
-        #     ret.update(neg_txt)
-        
         return ret
         
+
 def collate(batch, mlm_collator):
         
     batch_size = len(batch)

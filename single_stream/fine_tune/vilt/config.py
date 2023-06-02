@@ -32,7 +32,6 @@ def config():
     patch_size = 32
     draw_false_image = 1
     image_only = False
-    one_image = False
 
     # Text Setting
     # vqav2_label_size = 3129
@@ -66,10 +65,11 @@ def config():
     get_recall_metric = False
 
     # PL Trainer Setting
-    resume_from = None
+    resume_from = ""
     fast_dev_run = False
-    val_check_interval = 1.0
-    test_only = False
+    val_check_interval = 0.2
+    # check_val_every_n_epoch = 1
+    test_only = True
 
     # below params varies with the environment
     # data_root = "/data/s2478846/ViLT/dataset"
@@ -78,8 +78,7 @@ def config():
     per_gpu_batchsize = 16  # you should define this manually with per_gpu_batch_size=#
     num_gpus = 2
     num_nodes = 1
-    load_path = "vilt/weights/vilt_irtr_coco.ckpt"
-    # "/data/s2478846/cross_modal_retrieval/single_stream/fine_tune/vilt/weights/vilt_irtr_coco.ckpt"
+    load_path = "output/vilt_finetune/finetune_recipe1m_randaug_seed0_from_vilt_irtr_coco/version_18/checkpoints/epoch=7-step=29290.ckpt"
     num_workers = 16
     precision = 16
 
@@ -150,13 +149,13 @@ def task_finetune_recipe1m_randaug():
     exp_name = "finetune_recipe1m_randaug"
     datasets=["recipe1m"]
     train_transform_keys = ['pixelbert_randaug']
-    loss_names = _loss_names({"itm": 0.5, "irtr": 1})
-    batch_size = 256
-    max_epoch = 5
+    loss_names = _loss_names({"itm": 0.5, 'irtr': 1})
+    batch_size = 16
+    max_epoch = 10
     max_steps = None
     warmup_steps = 0.1
     get_recall_metric = True
-    draw_false_text = 15
+    draw_false_text = 9
     learning_rate = 1e-4
 
     

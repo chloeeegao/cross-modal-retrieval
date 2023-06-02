@@ -2,7 +2,7 @@ import argparse
 
 
 def get_args():
-
+    
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", default='/data/s2478846/data', type=str, required=False,
                         help="The input data dir with all required files.")
@@ -97,6 +97,7 @@ def get_args():
                         help="Model directory for evaluation.")
     parser.add_argument("--no_cuda", action='store_true', help="Avoid using CUDA.")
     parser.add_argument('--seed', type=int, default=88, help="random seed for initialization.")
+    
     args = parser.parse_known_args()[0]
 
     return args

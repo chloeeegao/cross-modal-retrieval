@@ -8,7 +8,6 @@ import tqdm
 import functools
 
 from torch.utils.data.distributed import DistributedSampler
-from torch.utils.data import Sampler, SequentialSampler
 from einops import rearrange
 
 from modules.dist_utils import all_gather
@@ -117,87 +116,6 @@ def compute_mlm(pl_module, batch):
     return ret
 
 
-def compute_mpp(pl_module, batch):
-    infer = pl_module.infer(batch, mask_text=False, mask_image=True)
-    mpp_logits = pl_module.mpp_score(infer["image_feats"])
-    mpp_logits = torch.stack(
-        [
-            mpp_logits[:, :, 0:256],
-            mpp_logits[:, :, 256:512],
-            mpp_logits[:, :, 512:768],
-        ],
-        dim=2,
-    )
-    mpp_labels = infer["image_labels"]
-
-    mpp_loss = F.cross_entropy(
-        mpp_logits.view(-1, 256),
-        mpp_labels.view(-1),
-        ignore_index=-100,
-    )
-
-    ret = {
-        "mpp_loss": mpp_loss,
-        "mpp_logits": mpp_logits,
-        "mpp_labels": mpp_labels,
-    }
-
-    phase = "train" if pl_module.training else "val"
-    loss = getattr(pl_module, f"{phase}_mpp_loss")(ret["mpp_loss"])
-    acc = getattr(pl_module, f"{phase}_mpp_accuracy")(
-        ret["mpp_logits"], ret["mpp_labels"]
-    )
-    pl_module.log(f"mpp/{phase}/loss", loss)
-    pl_module.log(f"mpp/{phase}/accuracy", acc)
-
-    return ret
-
-
-def compute_mppd(pl_module, batch):
-    infer = pl_module.infer(batch, mask_text=False, mask_image=True)
-    mppd_logits = pl_module.mppd_score(infer["image_feats"])
-    mppd_labels = infer["image_labels_mppd"]
-    filter_to_train = infer["image_labels"].float().mean(dim=-1) != -100
-
-    labels = mppd_labels[filter_to_train]
-    logits = mppd_logits[filter_to_train]
-    mppd_loss = F.mse_loss(logits, labels)
-
-    ret = {
-        "mppd_loss": mppd_loss,
-        "mppd_logits": mppd_logits,
-        "mppd_labels": mppd_labels,
-    }
-
-    phase = "train" if pl_module.training else "val"
-    loss = getattr(pl_module, f"{phase}_mppd_loss")(ret["mppd_loss"])
-    pl_module.log(f"mppd/{phase}/loss", loss)
-
-    return ret
-
-
-def compute_mpfr(pl_module, batch):
-    infer = pl_module.infer(batch, mask_text=False, mask_image=True)
-    mpfr_logits = pl_module.mpfr_score(infer["image_feats"])
-    mpfr_labels = infer["image_labels_mpfr"]
-    filter_to_train = infer["image_labels"].float().mean(dim=-1) != -100
-
-    labels = mpfr_labels[filter_to_train]
-    logits = mpfr_logits[filter_to_train]
-    mpfr_loss = F.mse_loss(logits, labels)
-
-    ret = {
-        "mpfr_loss": mpfr_loss,
-        "mpfr_logits": mpfr_logits,
-        "mpfr_labels": mpfr_labels,
-    }
-
-    phase = "train" if pl_module.training else "val"
-    loss = getattr(pl_module, f"{phase}_mpfr_loss")(ret["mpfr_loss"])
-    pl_module.log(f"mpfr/{phase}/loss", loss)
-
-    return ret
-
 
 def compute_itm_wpa(pl_module, batch):
     pos_len = len(batch["text"]) // 2
@@ -298,105 +216,6 @@ def compute_imgcls(pl_module, batch):
 
     return ret
 
-
-def compute_vqa(pl_module, batch):
-    infer = pl_module.infer(batch, mask_text=False, mask_image=False)
-    vqa_logits = pl_module.vqa_classifier(infer["cls_feats"])
-    vqa_targets = torch.zeros(
-        len(vqa_logits), pl_module.hparams.config["vqav2_label_size"]
-    ).to(pl_module.device)
-
-    vqa_labels = batch["vqa_labels"]
-    vqa_scores = batch["vqa_scores"]
-
-    for i, (_label, _score) in enumerate(zip(vqa_labels, vqa_scores)):
-        for l, s in zip(_label, _score):
-            vqa_targets[i, l] = s
-
-    vqa_loss = (
-        F.binary_cross_entropy_with_logits(vqa_logits, vqa_targets)
-        * vqa_targets.shape[1]
-    )  # https://github.com/jnhwkim/ban-vqa/blob/master/train.py#L19
-
-    ret = {
-        "vqa_loss": vqa_loss,
-        "vqa_logits": vqa_logits,
-        "vqa_targets": vqa_targets,
-        "vqa_labels": vqa_labels,
-        "vqa_scores": vqa_scores,
-    }
-
-    phase = "train" if pl_module.training else "val"
-    loss = getattr(pl_module, f"{phase}_vqa_loss")(ret["vqa_loss"])
-    score = getattr(pl_module, f"{phase}_vqa_score")(
-        ret["vqa_logits"], ret["vqa_targets"]
-    )
-    pl_module.log(f"vqa/{phase}/loss", loss)
-    pl_module.log(f"vqa/{phase}/score", score)
-
-    return ret
-
-
-def compute_nlvr2(pl_module, batch):
-    infer1 = pl_module.infer(
-        batch, mask_text=False, mask_image=False, image_token_type_idx=1
-    )
-    infer2 = pl_module.infer(
-        batch, mask_text=False, mask_image=False, image_token_type_idx=2
-    )
-
-    cls_feats = torch.cat([infer1["cls_feats"], infer2["cls_feats"]], dim=-1)
-    nlvr2_logits = pl_module.nlvr2_classifier(cls_feats)
-
-    nlvr2_labels = batch["answers"]
-    nlvr2_labels = torch.tensor(nlvr2_labels).to(pl_module.device).long()
-    nlvr2_loss = F.cross_entropy(nlvr2_logits, nlvr2_labels)
-
-    ret = {
-        "nlvr2_loss": nlvr2_loss,
-        "nlvr2_logits": nlvr2_logits,
-        "nlvr2_labels": nlvr2_labels,
-    }
-
-    phase = "train" if pl_module.training else "val"
-
-    if phase == "train":
-        loss = getattr(pl_module, f"{phase}_nlvr2_loss")(ret["nlvr2_loss"])
-        acc = getattr(pl_module, f"{phase}_nlvr2_accuracy")(
-            ret["nlvr2_logits"], ret["nlvr2_labels"]
-        )
-        pl_module.log(f"nlvr2/{phase}/loss", loss)
-        pl_module.log(f"nlvr2/{phase}/accuracy", acc)
-    else:
-        dev_batches = [i for i, n in enumerate(batch["table_name"]) if "dev" in n]
-        test_batches = [i for i, n in enumerate(batch["table_name"]) if "test" in n]
-
-        if dev_batches:
-            dev_loss = getattr(pl_module, f"dev_nlvr2_loss")(
-                F.cross_entropy(
-                    ret["nlvr2_logits"][dev_batches], ret["nlvr2_labels"][dev_batches]
-                )
-            )
-            dev_acc = getattr(pl_module, f"dev_nlvr2_accuracy")(
-                ret["nlvr2_logits"][dev_batches], ret["nlvr2_labels"][dev_batches]
-            )
-            pl_module.log(f"nlvr2/dev/loss", dev_loss)
-            pl_module.log(f"nlvr2/dev/accuracy", dev_acc)
-        if test_batches:
-            test_loss = getattr(pl_module, f"test_nlvr2_loss")(
-                F.cross_entropy(
-                    ret["nlvr2_logits"][test_batches], ret["nlvr2_labels"][test_batches]
-                )
-            )
-            test_acc = getattr(pl_module, f"test_nlvr2_accuracy")(
-                ret["nlvr2_logits"][test_batches], ret["nlvr2_labels"][test_batches]
-            )
-            pl_module.log(f"nlvr2/test/loss", test_loss)
-            pl_module.log(f"nlvr2/test/accuracy", test_acc)
-
-    return ret
-
-
 def compute_irtr(pl_module, batch):
     is_training_phase = pl_module.training
 
@@ -492,13 +311,13 @@ def compute_irtr_recall(pl_module):
                 "text_ids": _b["text_ids"].to(pl_module.device),
                 "text_masks": _b["text_masks"].to(pl_module.device),
                 "text_labels": _b["text_labels"].to(pl_module.device),
-                "id_index": _b["id_index"],
+                "raw_index": _b["raw_index"],
             }
         )
 
     tiids = list()
     for pre in text_preload:
-        tiids += pre["id_index"]
+        tiids += pre["raw_index"]
     tiids = torch.tensor(tiids)
 
     image_preload = list()
@@ -508,7 +327,7 @@ def compute_irtr_recall(pl_module):
             max_image_len=pl_module.hparams.config["max_image_len"],
             mask_it=False,
         )
-        image_preload.append((ie, im, _b["id_index"][0]))
+        image_preload.append((ie, im, _b["raw_index"][0]))
 
     rank_scores = list()
     rank_iids = list()
@@ -575,140 +394,6 @@ def compute_irtr_recall(pl_module):
 
     return (ir_r1, ir_r5, ir_r10, tr_r1, tr_r5, tr_r10)
 
-
-
-# @torch.no_grad()
-# def compute_irtr_recall(pl_module):
-#     try:
-#         dm = pl_module.trainer.datamodule.dms[0]
-#     except AttributeError:
-#         dm = pl_module.trainer.datamodule
-        
-#     text_dset = dm.make_no_false_val_dset()
-#     text_dset.tokenizer = dm.tokenizer
-#     text_loader = torch.utils.data.DataLoader(
-#         text_dset,
-#         batch_size=64,
-#         num_workers=pl_module.hparams.config["num_workers"],
-#         pin_memory=True,
-#         collate_fn=functools.partial(
-#             text_dset.collate,
-#             mlm_collator=dm.mlm_collator,
-#         ),
-#     )
-
-#     image_dset = dm.make_no_false_val_dset(
-#         image_only=True
-#     )
-#     image_dset.tokenizer = dm.tokenizer
-
-#     # dist_sampler = DistributedSampler(image_dset, shuffle=False)
-#     sampler = SequentialSampler(image_dset)
-    
-#     image_loader = torch.utils.data.DataLoader(
-#         image_dset,
-#         batch_size=1,
-#         num_workers=pl_module.hparams.config["num_workers"],
-#         # sampler=dist_sampler,
-#         sampler = sampler,
-#         pin_memory=True,
-#         collate_fn=functools.partial(
-#             image_dset.collate,
-#             mlm_collator=dm.mlm_collator,
-#         ),
-#     )
-
-#     text_preload = list()
-#     for _b in tqdm.tqdm(text_loader, desc="text prefetch loop"):
-#         text_preload.append(
-#             {
-#                 "text_ids": _b["text_ids"].to(pl_module.device),
-#                 "text_masks": _b["text_masks"].to(pl_module.device),
-#                 "text_labels": _b["text_labels"].to(pl_module.device),
-#                 "img_index": _b["img_index"],
-#             }
-#         )
-
-#     tiids = list()
-#     for pre in text_preload:
-#         tiids += pre["img_index"]
-#     tiids = torch.tensor(tiids)
-
-#     image_preload = list()
-#     for _b in tqdm.tqdm(image_loader, desc="image prefetch loop"):
-#         (ie, im, _, _) = pl_module.transformer.visual_embed(
-#             _b["image"][0].to(pl_module.device),
-#             max_image_len=pl_module.hparams.config["max_image_len"],
-#             mask_it=False,
-#         )
-#         image_preload.append((ie, im, _b["img_index"][0]))
-
-#     rank_scores = list()
-#     rank_iids = list()
-
-#     for img_batch in tqdm.tqdm(image_preload, desc="rank loop"):
-#         _ie, _im, _iid = img_batch
-#         _, l, c = _ie.shape
-
-#         img_batch_score = list()
-#         for txt_batch in text_preload:
-#             fblen = len(txt_batch["text_ids"])
-#             ie = _ie.expand(fblen, l, c)
-#             im = _im.expand(fblen, l)
-
-#             with torch.cuda.amp.autocast():
-#                 score = pl_module.rank_output(
-#                     pl_module.infer(
-#                         {
-#                             "text_ids": txt_batch["text_ids"],
-#                             "text_masks": txt_batch["text_masks"],
-#                             "text_labels": txt_batch["text_labels"],
-#                         },
-#                         image_embeds=ie,
-#                         image_masks=im,
-#                     )["cls_feats"]
-#                 )[:, 0]
-
-#             img_batch_score.append(score)
-
-#         img_batch_score = torch.cat(img_batch_score)
-#         rank_scores.append(img_batch_score.cpu().tolist())
-#         rank_iids.append(_iid)
-
-#     # # torch.distributed.barrier()
-#     # gather_rank_scores = all_gather(rank_scores)
-#     # gather_rank_iids = all_gather(rank_iids)
-
-#     iids = torch.tensor(rank_iids) #gather_rank_scores
-#     iids = iids.view(-1)
-#     scores = torch.tensor(rank_scores) #gather_rank_iids
-#     scores = scores.view(len(iids), -1)
-
-#     topk10 = scores.topk(10, dim=1)
-#     topk5 = scores.topk(5, dim=1)
-#     topk1 = scores.topk(1, dim=1)
-#     topk10_iids = tiids[topk10.indices]
-#     topk5_iids = tiids[topk5.indices]
-#     topk1_iids = tiids[topk1.indices]
-
-#     tr_r10 = (iids.unsqueeze(1) == topk10_iids).float().max(dim=1)[0].mean()
-#     tr_r5 = (iids.unsqueeze(1) == topk5_iids).float().max(dim=1)[0].mean()
-#     tr_r1 = (iids.unsqueeze(1) == topk1_iids).float().max(dim=1)[0].mean()
-
-#     topk10 = scores.topk(10, dim=0)
-#     topk5 = scores.topk(5, dim=0)
-#     topk1 = scores.topk(1, dim=0)
-#     topk10_iids = iids[topk10.indices]
-#     topk5_iids = iids[topk5.indices]
-#     topk1_iids = iids[topk1.indices]
-
-#     ir_r10 = (tiids.unsqueeze(0) == topk10_iids).float().max(dim=0)[0].mean()
-#     ir_r5 = (tiids.unsqueeze(0) == topk5_iids).float().max(dim=0)[0].mean()
-#     ir_r1 = (tiids.unsqueeze(0) == topk1_iids).float().max(dim=0)[0].mean()
-
-#     return (ir_r1, ir_r5, ir_r10, tr_r1, tr_r5, tr_r10)
-
-
 def init_weights(module):
     if isinstance(module, (nn.Linear, nn.Embedding)):
         module.weight.data.normal_(mean=0.0, std=0.02)
@@ -719,53 +404,8 @@ def init_weights(module):
     if isinstance(module, nn.Linear) and module.bias is not None:
         module.bias.data.zero_()
 
-
-def vqa_test_step(pl_module, batch, output):
-    id2answer = (
-        pl_module.trainer.datamodule.dm_dicts["vqa_trainval"].id2answer
-        if "vqa_trainval" in pl_module.trainer.datamodule.dm_dicts
-        else pl_module.trainer.datamodule.dm_dicts["vqa"].id2answer
-    )
-    vqa_logits = output["vqa_logits"]
-    vqa_preds = vqa_logits.argmax(dim=-1)
-    vqa_preds = [id2answer[pred.item()] for pred in vqa_preds]
-    questions = batch["text"]
-    qids = batch["qid"]
-    return {"qids": qids, "preds": vqa_preds}
-
-
 def arc_test_step(pl_module, batch, output):
     return output
-
-
-def vqa_test_wrapup(outs, model_name):
-    rank = torch.distributed.get_rank()
-    qids, preds = list(), list()
-    for out in outs:
-        qids += out["qids"]
-        preds += out["preds"]
-
-    rets = list()
-    for qid, pred in zip(qids, preds):
-        rets.append({"question_id": qid, "answer": pred})
-    with open(f"vqa_submit_{rank}.json", "w") as fp:
-        json.dump(rets, fp, indent=4)
-
-    torch.distributed.barrier()
-
-    if rank == 0:
-        jsons = list()
-        paths = list(glob.glob("vqa_submit_*.json"))
-        for path in paths:
-            with open(path, "r") as fp:
-                jsons += json.load(fp)
-        os.makedirs("result", exist_ok=True)
-        with open(f"result/vqa_submit_{model_name}.json", "w") as fp:
-            json.dump(jsons, fp, indent=4)
-
-    torch.distributed.barrier()
-    os.remove(f"vqa_submit_{rank}.json")
-
 
 def arc_test_wrapup(outs, caplen, model_name):
     rank = torch.distributed.get_rank()

@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, DistributedSampler
 from tqdm import tqdm
+import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.multiprocessing as mp
 from torch.distributed import init_process_group, destroy_process_group
@@ -19,6 +20,11 @@ from torch.optim import AdamW
 
 from config import get_args
 from dataset import RetrievalDataset
+
+args = get_args()
+global logger
+mkdir(args.output_dir)
+logger = setup_logger("vlpretrain", args.output_dir, 0)
 
 def ddp_setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
@@ -36,36 +42,6 @@ def compute_score_with_logits(logits, labels):
             if (logit_ >= 0.5 and label == 1) or (logit_ < 0.5 and label == 0):
                 scores[i] = 1
     return scores
-
-
-def compute_ranks(dataset, results):
-    labels = np.array([dataset.get_label(i) for i in range(len(dataset))])
-    similarities = np.array([results[i] for i in range(len(dataset))])
-    num_dim = len(dataset.img_names)
-    labels = np.reshape(labels, [-1, num_dim])
-    similarities = np.reshape(similarities, [-1, num_dim])
-    i2t_ranks, t2i_ranks = [], []
-    for lab, sim in zip(labels, similarities):
-        inds = np.argsort(sim)[::-1]
-        rank = num_dim
-        for r, ind in enumerate(inds):
-            if lab[ind] == 1:
-                rank = r
-                break
-        t2i_ranks.append(rank)
-        
-    labels = np.swapaxes(labels, 0, 1)
-    similarities = np.swapaxes(similarities, 0, 1)
-    for lab, sim in zip(labels, similarities):
-        inds = np.argsort(sim)[::-1]
-        rank = num_dim
-        for r, ind in enumerate(inds):
-            if lab[ind] == 1:
-                rank = r
-                break
-        i2t_ranks.append(rank)
-    return i2t_ranks, t2i_ranks
-
 
 def save_checkpoint(model, tokenizer, args, epoch, global_step):
     checkpoint_dir = op.join(args.output_dir, 'checkpoint-{}-{}'.format(
@@ -94,16 +70,16 @@ def train(args, train_dataset, val_dataset, model, tokenizer, rank=None):
     else:
         train_sampler = RandomSampler(train_dataset) 
     train_dataloader = DataLoader(train_dataset, sampler=train_sampler, 
-            batch_size=args.train_batch_size, num_workers=args.num_workers)
+            batch_size=args.train_batch_size, num_workers=args.num_workers, pin_memory=True)
 
     if args.max_steps > 0:
         t_total = args.max_steps
         args.num_train_epochs = args.max_steps // (len(train_dataloader) // \
                 args.gradient_accumulation_steps) + 1
     else:
-        t_total = len(train_dataloader) // args.gradient_accumulation_steps \
-                * args.num_train_epochs
-
+        t_total = len(train_dataloader) * args.num_train_epochs \
+                // args.gradient_accumulation_steps
+                
     # Prepare optimizer and scheduler
     no_decay = ['bias', 'LayerNorm.weight']
     grouped_parameters = [
@@ -123,11 +99,15 @@ def train(args, train_dataset, val_dataset, model, tokenizer, rank=None):
         raise ValueError("Unknown scheduler type: {}".format(args.scheduler))
         
     if rank != None:
+        logger.info("*****Using DDP**********")
         model = model.to(rank)
         # wrap with DDP, this step will synch model across all the processes
         model = DDP(model, device_ids=[rank], find_unused_parameters=False)
     elif args.n_gpu > 1 and rank == None:
         model = torch.nn.DataParallel(model)
+    else:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        model = model.to(device)
 
     if rank == 0:
         logger.info("***** Running training *****")
@@ -142,6 +122,7 @@ def train(args, train_dataset, val_dataset, model, tokenizer, rank=None):
     global_step, global_loss, global_acc =0,  0.0, 0.0
     log_json = []
     best_score = 0
+    count_step = 0
     for epoch in range(int(args.num_train_epochs)):
         for step, (_, batch) in enumerate(train_dataloader):
             model.train()
@@ -166,6 +147,8 @@ def train(args, train_dataset, val_dataset, model, tokenizer, rank=None):
             batch_acc = batch_score.item() / (args.train_batch_size * 2)
             global_loss += loss.item()
             global_acc += batch_acc
+            count_step +=1
+            
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 global_step += 1
                 optimizer.step()
@@ -173,23 +156,23 @@ def train(args, train_dataset, val_dataset, model, tokenizer, rank=None):
                 optimizer.zero_grad()
                 if global_step % args.logging_steps == 0:
                     logger.info("Epoch: {}, global_step: {}, lr: {:.6f}, loss: {:.4f} ({:.4f}), " \
-                        "score: {:.4f} ({:.4f})".format(epoch, global_step, 
-                        optimizer.param_groups[0]["lr"], loss, global_loss / global_step, 
-                        batch_acc, global_acc / global_step)
+                        "score: {:.4f} ({:.4f})".format(epoch+1, global_step, 
+                        optimizer.param_groups[0]["lr"], loss, global_loss / count_step, 
+                        batch_acc, global_acc / count_step)
                     )
 
-                if (args.save_steps > 0 and global_step % args.save_steps == 0) or \
+                if (args.save_steps > 0 and global_step % args.save_steps == 0 and rank == 0) or \
                         global_step == t_total:
                     save_checkpoint(model, tokenizer, args, epoch, global_step) 
                     # evaluation
-                    if args.evaluate_during_training: 
+                    if args.evaluate_during_training and rank == 0: 
                         logger.info("Perform evaluation at step: %d" % (global_step))
                         test_result = test(args, model, val_dataset, rank = rank)
                         eval_result = evaluate(val_dataset, test_result)
                         rank_accs = eval_result['i2t_retrieval']
                         if rank_accs['R@1'] > best_score:
                             best_score = rank_accs['R@1']
-                        epoch_log = {'epoch': epoch, 'global_step': global_step, 
+                        epoch_log = {'epoch': epoch+1, 'global_step': global_step, 
                                      'R1': rank_accs['R@1'], 'R5': rank_accs['R@5'], 
                                      'R10': rank_accs['R@10'], 'best_R1':best_score}
                         log_json.append(epoch_log)
@@ -199,61 +182,114 @@ def train(args, train_dataset, val_dataset, model, tokenizer, rank=None):
 
 
 def test(args, model, eval_dataset, rank=None):
-    args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
-    eval_sampler = SequentialSampler(eval_dataset)
-    eval_dataloader = DataLoader(eval_dataset, sampler=eval_sampler,
-            batch_size=args.eval_batch_size, num_workers=args.num_workers)
-    
+    # args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
+    # args.eval_batch_size = args.per_gpu_eval_batch_size
+    args.eval_batch_size = 20
     logger.info("Num examples = {}".format(len(eval_dataset)))
     logger.info("Evaluation batch size = {}".format(args.eval_batch_size))
+    eval_sampler = SequentialSampler(eval_dataset)
+    
+    image_loader = DataLoader(eval_dataset, sampler=eval_sampler, pin_memory=True,
+            batch_size=1, num_workers=args.num_workers)
+    
+    text_loader = DataLoader(eval_dataset, batch_size=args.eval_batch_size, 
+                             sampler=SequentialSampler(eval_dataset),
+                             num_workers=args.num_workers, pin_memory=True)
+    
+    text_preload = list()
+    for _, _b in tqdm(text_loader, desc="text prefetch loop"):
+        text_preload.append({
+            'input_ids': _b[0].to(rank),
+            'attention_mask': _b[1].to(rank),
+            'token_type_ids': _b[2].to(rank),
+        })
+    
+    image_preload = list()
+    for _, _b in tqdm(image_loader, desc="image prefetch loop"):
+        image_preload.append(_b[3].to(rank))
+    
     model.eval()
     results = {}
     softmax = nn.Softmax(dim=1)
-    for indexs, batch in tqdm(eval_dataloader):
-        batch = tuple(t.to(rank) for t in batch)
-        with torch.no_grad():
-            inputs = {
-                'input_ids':      batch[0],
-                'attention_mask': batch[1],
-                'token_type_ids': batch[2],
-                'img_feats':      batch[3],
-                'labels':         batch[4]
-            }
-            _, logits = model(**inputs)[:2]
-            if args.num_labels == 2:
-                probs = softmax(logits)
-                result = probs[:, 1] # the confidence to be a matched pair
-            else:
-                result = logits
-            result = [_.to(torch.device("cpu")) for _ in result]
-            results.update({idx.item(): res.item() for idx, res in zip(indexs, result)})
+    
+    for idx, img_batch in tqdm(enumerate(image_preload), desc='rank loop'):
+        _result = []
+        _img_feat = img_batch
+        _, l, c = _img_feat.shape
+
+        labels = [0] * len(image_preload)
+        labels[idx] = 1
+        labels = np.reshape(labels, [len(text_preload), -1])
+                
+        for i, txt_batch in enumerate(text_preload):
+            fblen = len(txt_batch['input_ids'])
+            img_feat = _img_feat.expand(fblen, l, c)
+            label = labels[i]
+            label = torch.Tensor(label).long().to(rank)
+            with torch.cuda.amp.autocast():
+                with torch.no_grad():
+                    inputs = {
+                            'input_ids':      txt_batch['input_ids'],
+                            'attention_mask': txt_batch['attention_mask'],
+                            'token_type_ids': txt_batch['token_type_ids'],
+                            'img_feats':      img_feat,
+                            'labels':         label
+                            }
+                    _, logits = model(**inputs)[:2]
+                    if args.num_labels == 2:
+                        probs = softmax(logits)
+                        result = probs[:, 1] # the confidence to be a matched pair
+                    else:
+                        result = logits
+                    result = [_.to(torch.device("cpu")) for _ in result]
+                    _result.extend(result)        
+        results.update({idx: _result})
     return results
 
+def compute_ranks(dataset, results):
+    # labels = np.array([dataset.get_label(i) for i in range(len(dataset))])
+    # labels = [1] + [0]* (len(dataset) - 1)
+    similarities = np.array([results[i] for i in range(len(dataset))])
+    labels = np.zeros_like(similarities)
+    np.fill_diagonal(labels, 1)
+    num_dim = len(dataset)
+    # labels = np.reshape(np.array(labels * num_dim), [-1, num_dim])
+    # similarities = np.reshape(similarities, [-1, num_dim])
+    i2t_ranks, t2i_ranks = [], []
+    for lab, sim in zip(labels, similarities):
+        inds = np.argsort(sim)[::-1]
+        rank = num_dim
+        for r, ind in enumerate(inds):
+            if lab[ind] == 1:
+                rank = r
+                break
+        t2i_ranks.append(rank)
+        
+    labels = np.swapaxes(labels, 0, 1)
+    similarities = np.swapaxes(similarities, 0, 1)
+    for lab, sim in zip(labels, similarities):
+        inds = np.argsort(sim)[::-1]
+        rank = num_dim
+        for r, ind in enumerate(inds):
+            if lab[ind] == 1:
+                rank = r
+                break
+        i2t_ranks.append(rank)
+    return i2t_ranks, t2i_ranks
 
 def evaluate(eval_dataset, test_results):
     i2t_ranks, t2i_ranks = compute_ranks(eval_dataset, test_results)
     rank = [1, 5, 10]
-    i2t_accs = [sum([_ < r for _ in i2t_ranks]) / len(i2t_ranks) for r in rank]
+    i2t_accs = [sum([_ <= r for _ in i2t_ranks]) / len(i2t_ranks) for r in rank]
     logger.info("I2T Retrieval: {:.4f} @ R1, {:.4f} @ R5, {:.4f} @ R10".format(
                 i2t_accs[0], i2t_accs[1], i2t_accs[2]))
     eval_result = {"i2t_retrieval": {"R@1": i2t_accs[0], "R@5": i2t_accs[1], "R@10": i2t_accs[2]}}
     if t2i_ranks:
-        t2i_accs = [sum([_ < r for _ in t2i_ranks]) / len(t2i_ranks) for r in rank]
+        t2i_accs = [sum([_ <= r for _ in t2i_ranks]) / len(t2i_ranks) for r in rank]
         logger.info("T2I Retrieval: {:.4f} @ R1, {:.4f} @ R5, {:.4f} @ R10".format(
                     t2i_accs[0], t2i_accs[1], t2i_accs[2]))
         eval_result["t2i_retrieval"] = {"R@1": t2i_accs[0], "R@5": t2i_accs[1], "R@10": t2i_accs[2]}
     return eval_result
-
-
-# def get_predict_file(args):
-#     cc = []
-#     data = op.basename(op.join(args.data_dir, '')[:-1])
-#     if data != 'coco_ir':
-#         cc.append(data)
-#     cc.append(args.test_split)
-#     if args.add_od_labels:
-#         cc.append('wlabels{}'.format(args.od_label_type))
-#     return op.join(args.eval_model_dir, '{}.results.pt'.format('.'.join(cc))) 
 
 
 def restore_training_settings(args):
@@ -273,18 +309,10 @@ def restore_training_settings(args):
     return args
 
 
-def main(rank, args, world_size):
+def main(rank, args, world_size, seed):
     mp.set_start_method('fork', force=True)
     ddp_setup(rank, world_size)
-    
-    args = get_args()
-    global logger
-    mkdir(args.output_dir)
-    logger = setup_logger("vlpretrain", args.output_dir, 0)
-
-    # args.device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
-    args.n_gpu = torch.cuda.device_count()
-    set_seed(args.seed, args.n_gpu)
+    set_seed(seed, world_size)
     logger.warning("Device: %s, n_gpu: %s", rank+1, world_size)
     if rank ==0:
         logger.info('output_mode: {}, #Labels: {}'.format(args.output_mode, args.num_labels))
@@ -312,51 +340,44 @@ def main(rank, args, world_size):
         logger.info("Evaluate the following checkpoint: %s", checkpoint)
         model = model_class.from_pretrained(checkpoint, config=config)
 
-    # model.to(args.device)
     if rank == 0:
         logger.info("Training/evaluation parameters %s", args)
     if args.do_train:
-        train_dataset = RetrievalDataset(tokenizer, args, 'train', is_train=True, fast_run=args.fast_run)
+        train_dataset = RetrievalDataset(args, tokenizer, 'train', is_train=True)
         if args.evaluate_during_training:
-            val_dataset = RetrievalDataset(tokenizer, args, 'val', is_train=False, fast_run=args.fast_run)
+            val_dataset = RetrievalDataset(args, tokenizer, 'val', is_train=False)
         else:
             val_dataset = None
         global_step, avg_loss = train(args, train_dataset, val_dataset, model, tokenizer, rank=rank)
         logger.info("Training done: total_step = %s, avg loss = %s", global_step, avg_loss)
 
     # inference and evaluation
-    # if args.do_test or args.do_eval:
-    #     args = restore_training_settings(args)
-    #     test_dataset = RetrievalDataset(tokenizer, args, args.test_split, is_train=False)
-    #     checkpoint = args.eval_model_dir
-    #     assert op.isdir(checkpoint)
-    #     logger.info("Evaluate the following checkpoint: %s", checkpoint)
-    #     model = model_class.from_pretrained(checkpoint, config=config)
-    #     model.to(args.device)
-    #     if args.n_gpu > 1:
-    #         model = torch.nn.DataParallel(model)
-
-    #     pred_file = get_predict_file(args)
-    #     if op.isfile(pred_file):
-    #         logger.info("Prediction file exist, skip inference.")
-    #         if args.do_eval:
-    #             test_result = torch.load(pred_file)
-    #     else:
-    #         test_result = test(args, model, test_dataset)
-    #         torch.save(test_result, pred_file)
-    #         logger.info("Prediction results saved to {}.".format(pred_file))
-
-    #     if args.do_eval:
-    #         eval_result = evaluate(test_dataset, test_result)
-    #         result_file = op.splitext(pred_file)[0] + '.eval.json'
-    #         with open(result_file, 'w') as f:
-    #             json.dump(eval_result, f)
-    #         logger.info("Evaluation results saved to {}.".format(result_file))
-            
+    if args.do_test or args.do_eval:
+        args = restore_training_settings(args)
+        test_dataset = RetrievalDataset(args, tokenizer, split='test', is_train=False)
+        checkpoint = args.eval_model_dir
+        assert op.isdir(checkpoint)
+        if rank ==0:
+            logger.info("Evaluate the following checkpoint: %s", checkpoint)
+        model = model_class.from_pretrained(checkpoint, config=config)
+        if rank != None:
+            model = model.to(rank)
+            # wrap with DDP, this step will synch model across all the processes
+            model = DDP(model, device_ids=[rank], find_unused_parameters=False)
+        elif args.n_gpu > 1 and rank == None:
+            model = torch.nn.DataParallel(model)
+        else:
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            model = model.to(device)
+        test_result = test(args, model, test_dataset, rank=rank)
+        if args.do_eval:
+            _ = evaluate(test_dataset, test_result)
+            logger.info("*************Finish Evaluate*****************")       
     destroy_process_group()
 
 if __name__ == "__main__":
-    args = get_args()  
+    args = get_args() 
     world_size = torch.cuda.device_count()
     args.n_gpu = world_size
-    mp.spawn(main, args=(args, world_size), nprocs=world_size, join=True)
+    seed = 1234
+    mp.spawn(main, args=(args, world_size, seed), nprocs=world_size, join=True)
