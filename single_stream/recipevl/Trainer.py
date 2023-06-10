@@ -4,14 +4,14 @@ import random
 import pickle
 import torch
 import json
-from torch import nn
+import torch.nn as nn
 from torch.utils.data import DataLoader
 import torch.distributed as dist
 from torch.utils.data.distributed import DistributedSampler
-import torch.backends.cudnn as cudnn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
 from transformers import (
+    get_polynomial_decay_schedule_with_warmup,
     get_linear_schedule_with_warmup,
     get_cosine_schedule_with_warmup,
     DataCollatorForLanguageModeling, 
@@ -28,24 +28,17 @@ global logger
 save_path = os.path.join(args.output_dir, args.model_name)
 make_dir(save_path)
 logger = setup_logger("recipevl", save_path, 'log.txt')
-
-
-# class metric_log:
-    
-#     def __init__(self) -> None:
-#         pass
-    
-#     def 
-
+MAP_LOC = None if torch.cuda.is_available() else 'cpu'
 
 class Trainer:
-    def __init__(self, args, model, train_dataset, test_dataset=None, rank=None):
+    def __init__(self, args, model, train_dataset=None, test_dataset=None, rank=None, is_train=True):
         self.config = vars(args)
         self.rank = rank
+        self.is_train = is_train
         if self.rank != None:
             self.local_rank = rank
             logger.info(f"Running on rank {rank+1} / {dist.get_world_size()}.")
-        self.tokenizer = train_dataset.tokenizer
+        self.tokenizer = train_dataset.tokenizer if train_dataset else None
         fast_run = self.config['fast_run']
         # build dataloader
         if not fast_run:
@@ -58,7 +51,7 @@ class Trainer:
             self.test_dataset = [test_dataset[i] for i in range(100)]
             self.config['n_epochs'] = 2
         
-        self.train_loader = self.prepare_dataloader(self.train_dataset)
+        self.train_loader = self.prepare_dataloader(self.train_dataset) if train_dataset else None
         self.test_loader = self.prepare_dataloader(self.test_dataset) if test_dataset else None 
         
         # initialize train 
@@ -66,31 +59,44 @@ class Trainer:
         self.model = model
         self.total_params = count_parameters(self.model)
         
-        if self.config['resume_from'] != '':
-            self.optimizer = self.load_checkpoint()
-        else:  
-            self.optimizer, self.scheduler = self.set_scheduler()
+        self.optimizer, self.scheduler = self.set_scheduler()
         
+        model_state_dict, opt_state_dict = None, None
+        if self.config['resume_from'] != '' and is_train:
+            path = self.config['resume_from']
+            model_state_dict, opt_state_dict = self.load_checkpoint(path)
+        elif self.config['load_path'] != '':
+            path = self.config['load_path']
+            model_state_dict, opt_state_dict = self.load_checkpoint(path)    
+            
+        if model_state_dict != None:
+            if hasattr(self.model, "module"):
+                self.model.module.load_state_dict(model_state_dict)
+            else:
+                self.model.load_state_dict(model_state_dict)
+            self.optimizer.load_state_dict(opt_state_dict)
+            for state in self.optimizer.state.values():
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor):
+                        state[k] = v.to(rank)
+                    
         if self.rank != None:
             self.model = model.to(self.local_rank)
             # wrap with DDP, this step will synch model across all the processes
             self.model = DDP(self.model, device_ids=[self.local_rank], find_unused_parameters=True)  #module
-        # elif self.rank == None and self.config['do_train']:
-        #     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        #     if device != 'cpu' and torch.cuda.device_count() > 1:
-        #         self.model = nn.DataParallel(model)
-        #     self.model = self.model.to(device)
-        #     self.local_rank = device
-        # else:
-        #     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        #     self.model = self.model.to(device)
-        #     self.local_rank = device
+        else:
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            if device != 'cpu' and torch.cuda.device_count() > 1:
+                self.model = nn.DataParallel(model)
+            self.model = self.model.to(device)
+            self.local_rank = device
         
         # print training information 
-        if self.config['do_train'] and self.local_rank == 0:
+        if not self.config['do_eval'] and self.local_rank == 0:
             logger.info("*************** Running training ****************")
-            t_total =len(self.train_loader) // self.config['gradient_accumulation_steps'] \
-                    * self.config['n_epochs']
+            t_total = len(self.train_loader) * self.config['n_epochs'] \
+                      // self.config['gradient_accumulation_steps']
+                
             train_batch_size = self.config['per_gpu_train_batch_size'] * max(1, self.config['n_gpus'])
             logger.info("  Num examples = %d", len(self.train_dataset))
             logger.info("  Num Epochs = %d", self.config['n_epochs'])
@@ -111,7 +117,7 @@ class Trainer:
         
         mlm_collator = collator(tokenizer=self.tokenizer, mlm=True, mlm_probability= self.config['mlm_prob'])
         
-        if self.config['do_train']:
+        if self.config['do_train'] or self.config['do_fine_tune']:
             batch_size = self.config['per_gpu_train_batch_size'] * self.config['n_gpus']
         else:
             batch_size = self.config['eval_batch_size']
@@ -135,15 +141,13 @@ class Trainer:
 
         return loader
         
-    def run_batch(self, batch, is_train=True):
+    def run_batch(self, batch, is_train):
         
         output = self.model(batch)
         batch_loss = sum([v for k, v in output.items() if "loss" in k])
         batch_acc = output['itm_accuracy'].item()
-        
         if is_train:
             batch_loss.backward()
-            
         return batch_loss.item(), batch_acc
         
         
@@ -152,7 +156,7 @@ class Trainer:
         step_type = "Train" if is_train else "Val"
         
         for step, batch in enumerate(dataloader):
-            batch_loss, batch_acc = self.run_batch(batch, is_train)
+            batch_loss, batch_acc = self.run_batch(batch, is_train=is_train)
             if is_train and (step+1) % self.config['gradient_accumulation_steps'] == 0:
                 self.optimizer.step()
                 self.scheduler.step()
@@ -177,7 +181,7 @@ class Trainer:
                     logger.info("Num examples = %d", len(self.test_dataset))
                     logger.info("Evaluation batch size = %d", self.config['eval_batch_size'])
                 self.model.eval()
-                _ = self.run_epoch(epoch, self.test_loader, is_train=False)
+                # _ = self.run_epoch(epoch, self.test_loader, is_train=False)
                 (ir_r1, ir_r5, ir_r10, tr_r1, tr_r5, tr_r10) = compute_irtr_recall(self.model, self.test_dataset, self.tokenizer)
                 if ir_r1.item() > best_score:
                     logger.info("Updating best checkpoints")
@@ -194,28 +198,23 @@ class Trainer:
         if self.local_rank == 0:
             logger.info(f"**************** Finish training at Epoch {epoch} *******************")
 
-    def eval(self, test_dataset, N=100, K=1):
-        logger.info("******* Running evaluation *********")
+    def eval(self, test_dataset, tokenizer, N=100, K=1):
+        logger.info("************ Start evaluation *********")
         logger.info("Num examples = %d", len(test_dataset))
         ir_r1_l, ir_r5_l, ir_r10_l, tr_r1_l, tr_r5_l, tr_r10_l = [],[],[],[],[],[]
         index = [i for i in range(len(test_dataset))]
         for _ in range(K):
             random_sample = random.sample(index, N)
             dataset = [test_dataset[n] for n in random_sample]
-            (ir_r1, ir_r5, ir_r10, tr_r1, tr_r5, tr_r10) = compute_irtr_recall(self.model, dataset, self.tokenizer)
-            ir_r1_l.append(ir_r1)
-            ir_r5_l.append(ir_r5)
-            ir_r10_l.append(ir_r10)
-            tr_r1_l.append(tr_r1)
-            tr_r5_l.append(tr_r5)
-            tr_r10_l.append(tr_r10)
-        ir_r1_mean = np.mean(ir_r1_l)
-        ir_r5_mean = np.mean(ir_r5_l)
-        ir_r10_mean = np.mean(ir_r10_l)
-        tr_r1_mean = np.mean(tr_r1_l)
-        tr_r5_mean = np.mean(tr_r5_l)
-        tr_r10_mean = np.mean(tr_r10_l)
-        logger.info(f"TEST I2T Retrieval: {ir_r1_mean:.4f} @R1, {ir_r5_mean:.4f} @R5, {ir_r10_mean:.4f} @R10| TEST T2I Retrieval: {tr_r1_mean:.4f} @R1, {tr_r5_mean:.4f} @R5, {tr_r10_mean:.4f} @R10")
+            (ir_r1, ir_r5, ir_r10, tr_r1, tr_r5, tr_r10) = compute_irtr_recall(self.model, dataset, tokenizer)
+            print(ir_r1, ir_r5, ir_r10, tr_r1, tr_r5, tr_r10)
+            ir_r1_l.append(ir_r1.item())
+            ir_r5_l.append(ir_r5.item())
+            ir_r10_l.append(ir_r10.item())
+            tr_r1_l.append(tr_r1.item())
+            tr_r5_l.append(tr_r5.item())
+            tr_r10_l.append(tr_r10.item())
+        logger.info(f"TEST I2T Retrieval: {np.mean(ir_r1_l):.4f} @R1, {np.mean(ir_r5_l):.4f} @R5, {np.mean(ir_r10_l):.4f} @R10| TEST T2I Retrieval: {np.mean(tr_r1_l):.4f} @R1, {np.mean(tr_r5_l):.4f} @R5, {np.mean(tr_r10_l):.4f} @R10")
         logger.info("************* Finish evaluation *****************")
 
     def save_model(self, epoch, global_step):
@@ -232,32 +231,27 @@ class Trainer:
         pickle.dump(self.config, open(os.path.join(checkpoint_dir, 'config.pkl'), 'wb'))
         logger.info("Save checkpoint to {}".format(checkpoint_dir))
         
-    def load_checkpoint(self):
+    def load_checkpoint(self, path):
 
-        logger.info(f"Resuming training from: {self.config['resume_from']}")
-        resume_path = os.path.join(self.config['output_dir'], self.config['model_name'], self.config['resume_from'])
-        checkpoint = torch.load(os.path.join(resume_path, 'model_optim.pt'))
+        logger.info(f"Loading model from: {path}")
+        resume_path = os.path.join(self.config['output_dir'], self.config['model_name'], path)
+        checkpoint = torch.load(os.path.join(resume_path, 'model_optim.pt'), map_location=MAP_LOC)
         model_state_dict = checkpoint['model_state_dict']
         opt_state_dict = checkpoint['optim_state_dict']
         config = pickle.load(open(os.path.join(resume_path, 'config.pkl'), 'rb'))
-        
-        if hasattr(self.model, "module"):
-            self.model.module.load_state_dict(model_state_dict)
-        else:
-            self.model.load_state_dict(model_state_dict)
-            
-        optimizer, _ = self.set_scheduler()
-        optimizer.load_state_dict(opt_state_dict)
-        self.epochs_run = config['curr_epoch']
-        # logger.info(f"Resuming training from Epoch {self.epochs_run}")     
-        return optimizer
+        if self.config['resume_from'] != '':
+            self.epochs_run = config['curr_epoch']
+            logger.info(f"Resuming training from Epoch {self.epochs_run}")     
+        return model_state_dict, opt_state_dict
     
     def set_scheduler(self):
         
         lr = self.config['learning_rate']
         wd = self.config['weight_decay']
         # Prepare optimizer and scheduler
-        no_decay = ["bias", "LayerNorm.bias", "LayerNorm.weight"]
+        no_decay = ["bias", "LayerNorm.bias", "LayerNorm.weight",
+                    "norm.bias", "norm.weight", "norm1.bias","norm1.weight",
+                    "norm2.bias", "norm2.weight"]
         grouped_parameters = [
             {'params': [p for n, p in self.model.named_parameters() if not \
                 any(nd in n for nd in no_decay)], 'weight_decay': wd},
@@ -267,21 +261,36 @@ class Trainer:
         
         optimizer = AdamW(grouped_parameters, lr=lr, eps=self.config['adam_epsilon'])
         
-        if self.config['max_steps'] is None:
+        # if self.config['load_path'] == '':
+        if self.config['max_steps'] is None and not self.config['do_eval']:
             max_steps = (
-                len(self.train_loader) // self.config['gradient_accumulation_steps'] \
-                * self.config['n_epochs']
+                len(self.train_loader) * self.config['n_epochs'] \
+                // self.config['gradient_accumulation_steps'] 
             )
         else:
             max_steps = self.config['max_steps']
-        
-        if self.config['scheduler_name'] == 'linear':
-            scheduler = get_linear_schedule_with_warmup(
-                        optimizer, num_warmup_steps=self.config['warmup_steps'], num_training_steps=max_steps)
+
+        if self.config['resume_from'] != '' or self.config['load_path'] != '':
+            warmup_steps = 0
         else:
-            scheduler = get_cosine_schedule_with_warmup(
-                        optimizer, num_warmup_steps=self.config['warmup_steps'], num_training_steps=max_steps)
+            warmup_steps = self.config['warmup_steps']
+            if isinstance(self.config['warmup_steps'], float):
+                warmup_steps = int(max_steps * warmup_steps)
         
+        if self.config['do_eval']:    
+            scheduler = None
+        else:
+            if self.config['scheduler_name'] == 'cosine':
+                scheduler = get_cosine_schedule_with_warmup(
+                            optimizer, num_warmup_steps=warmup_steps, num_training_steps=max_steps)
+            elif self.config['scheduler_name'] == 'linear':
+                scheduler = get_linear_schedule_with_warmup(
+                    optimizer, num_training_steps=max_steps, num_warmup_steps=warmup_steps)
+            else:
+                scheduler = get_polynomial_decay_schedule_with_warmup(
+                            optimizer, num_warmup_steps=warmup_steps, num_training_steps=max_steps,
+                            lr_end=0, power=1)
+
         return optimizer, scheduler
   
         

@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-import multiprocessing
 from dataloader import get_loader
 from model import get_model
 import torch.backends.cudnn as cudnn
@@ -11,7 +10,7 @@ from tqdm import tqdm
 import torch
 import numpy as np
 import pickle
-from utils import load_checkpoint, count_parameters
+from utils.utils import load_checkpoint, count_parameters
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 map_loc = None if torch.cuda.is_available() else 'cpu'
@@ -62,7 +61,7 @@ def test(args):
 
     for _ in tqdm(range(total_step)):
 
-        ids, title, act_ing, img = loader.next()
+        ids, title, act_ing, img = next(loader)
 
         img = img.to(device)
         title = title.to(device)

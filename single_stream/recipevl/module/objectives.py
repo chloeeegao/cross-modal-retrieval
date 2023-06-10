@@ -7,7 +7,9 @@ import functools
 import tqdm 
 from transformers import DataCollatorForLanguageModeling
 from dataset import collate
-from dist_utils import all_gather
+from module.dist_utils import all_gather
+import random
+from einops import rearrange
 
 def accuracy(logits, target):
     
@@ -36,7 +38,7 @@ def compute_mlm(model, batch):
     device = dist.get_rank()
     module = model.module if hasattr(model, 'module') else model
     
-    infer = module.infer(batch, device, mask_text=True, mask_image=False)
+    infer = module.infer(batch, device=device, mask_text=True)
     mlm_logits = module.mlm_score(infer["text_feats"].to(device))
     mlm_labels = infer["text_labels"].to(device)
 
@@ -64,11 +66,17 @@ def compute_itm(model, batch):
     device = dist.get_rank()
     module = model.module if hasattr(model, 'module') else model
     
-    pos_len = len(batch["text"]) // 2
-    neg_len = len(batch["text"]) - pos_len
-    itm_labels = torch.cat([torch.ones(pos_len), torch.zeros(neg_len)]).to(device)
-    itm_labels = itm_labels[torch.randperm(itm_labels.size(0))]
-
+    if batch['label'][0] == None:
+        pos_len = len(batch["text"]) // 2
+        neg_len = len(batch["text"]) - pos_len
+        itm_labels = torch.cat([torch.ones(pos_len), torch.zeros(neg_len)]).to(device)
+        itm_labels = itm_labels[torch.randperm(itm_labels.size(0))]
+    else:
+        for i, lab in enumerate(batch['label']):
+            if lab == 1 and random.random() < 0.5:
+                batch['label'][i] = 0
+        itm_labels = torch.Tensor(batch['label']).long().to(device)       
+                
     itm_images = [
         torch.stack(
             [
@@ -81,7 +89,7 @@ def compute_itm(model, batch):
 
     batch["image"] = itm_images
 
-    infer = module.infer(batch, device, mask_text=False, mask_image=False)
+    infer = module.infer(batch, device=device, mask_text=False)
     itm_logits = module.itm_score(infer["cls_feats"])
     itm_loss = F.cross_entropy(itm_logits, itm_labels.long())
 
@@ -92,10 +100,52 @@ def compute_itm(model, batch):
     }
 
     acc = accuracy(ret["itm_logits"], ret["itm_labels"])
-
     ret['itm_accuracy'] = acc
     
     return ret
+
+def compute_irtr(model, batch):
+
+    device = dist.get_rank()
+    module = model.module if hasattr(model, 'module') else model
+    
+    _bs, _c, _h, _w = batch["image"][0].shape
+    false_len = 7
+    
+    text_ids = torch.stack(
+        [batch[f"false_text_{i}_ids"] for i in range(false_len)], dim=1
+    )
+    text_masks = torch.stack(
+        [batch[f"false_text_{i}_masks"] for i in range(false_len)], dim=1
+    )
+    text_labels = torch.stack(
+        [batch[f"false_text_{i}_labels"] for i in range(false_len)], dim=1
+    )
+
+    text_ids = torch.cat([batch["text_ids"].unsqueeze(1), text_ids], dim=1)
+    text_masks = torch.cat([batch["text_masks"].unsqueeze(1), text_masks], dim=1)
+    text_labels = torch.cat([batch["text_labels"].unsqueeze(1), text_labels], dim=1)
+    images = batch["image"][0].unsqueeze(1).expand(_bs, false_len + 1, _c, _h, _w)
+
+    infer = module.infer(
+        {
+            "image": [rearrange(images, "bs fs c h w -> (bs fs) c h w")],
+            "text_ids": rearrange(text_ids, "bs fs tl -> (bs fs) tl"),
+            "text_masks": rearrange(text_masks, "bs fs tl -> (bs fs) tl"),
+            "text_labels": rearrange(text_labels, "bs fs tl -> (bs fs) tl"),
+        }
+    )
+    score = module.rank_output(infer["cls_feats"])[:, 0]
+    score = rearrange(score, "(bs fs) -> bs fs", bs=_bs, fs=false_len + 1)
+    answer = torch.zeros(_bs).to(score).long()
+    irtr_loss = F.cross_entropy(score, answer)
+
+    ret = {
+        "irtr_loss": irtr_loss,
+    }
+
+    return ret
+
 
 
 @torch.no_grad()
@@ -176,7 +226,7 @@ def compute_irtr_recall(model, dataset, tokenizer):
                                 "text_masks": txt_batch["text_masks"],
                                 "text_labels": txt_batch["text_labels"],
                             },
-                            device,
+                            device=None,
                             image_embeds=ie,
                             image_masks=im,
                         )["cls_feats"]

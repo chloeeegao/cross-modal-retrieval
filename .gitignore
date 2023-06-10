@@ -5,7 +5,7 @@ __pycache__
 .ipynb_checkpoints
 print.ipynb
 data/
-output/
+output
 pretrained_model/
 result/
 *.pkl
@@ -18,3 +18,4 @@ preprecessing/image_classifier.py
 weights/
 *.ckpt
 food_entity_extractor
+res

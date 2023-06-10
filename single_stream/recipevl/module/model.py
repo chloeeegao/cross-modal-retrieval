@@ -4,8 +4,8 @@ from transformers import ViTConfig
 from transformers.models.bert.modeling_bert import ( BertModel,
     BertConfig, BertEmbeddings, BertPredictionHeadTransform )
 
-import vit
-import objectives
+import module.vit as vit
+from module import objectives
 
 class Pooler(nn.Module):
     def __init__(self, hidden_size):
@@ -51,7 +51,7 @@ class RecipeVL(nn.Module):
         super(RecipeVL, self).__init__()
         
         self.training = training
-        self.current_tasks = [k for k, v in loss_names.items() if v >= 1]
+        self.current_tasks = [k for k, v in loss_names.items() if v >= 1 ]
         self.args = vars(args)
         
         bert_config = BertConfig(
@@ -104,17 +104,21 @@ class RecipeVL(nn.Module):
             for p in self.itm_score.parameters():
                 p.requires_grad = False
         
-    def infer(self, batch, device,
+    def infer(self, batch, device=None,
         mask_text=False,
-        mask_image=False,
         image_token_type_idx=1,
         image_embeds=None,
         image_masks=None):
         
         do_mlm = "_mlm" if mask_text else ""
-        text_ids = batch[f"text_ids{do_mlm}"].to(device)
-        text_labels = batch[f"text_labels{do_mlm}"].to(device)
-        text_masks = batch[f"text_masks"].to(device)
+        if device != None:
+            text_ids = batch[f"text_ids{do_mlm}"].to(device)
+            text_labels = batch[f"text_labels{do_mlm}"].to(device)
+            text_masks = batch[f"text_masks"].to(device)
+        else:
+            text_ids = batch[f"text_ids{do_mlm}"]
+            text_labels = batch[f"text_labels{do_mlm}"]
+            text_masks = batch[f"text_masks"]
         
         if self.text_encoder == None:
             text_embeds = self.text_embeddings(text_ids)
@@ -123,7 +127,10 @@ class RecipeVL(nn.Module):
             text_embeds = out.last_hidden_state
         
         if image_embeds is None and image_masks is None:
-            img = batch['image'][0].to(device)
+            if device != None:
+                img = batch['image'][0].to(device)
+            else:
+                img = batch['image'][0]
             image_embeds, image_masks = self.transformer.visual_embed(img)
         
         text_embeds, image_embeds = (
@@ -176,7 +183,7 @@ class RecipeVL(nn.Module):
             ret.update(objectives.compute_itm(self, batch))
 
         # Image Retrieval and Text Retrieval
-        # if "irtr" in self.current_tasks:
-        #     ret.update(objectives.compute_irtr(self, batch))
+        if "irtr" in self.current_tasks:
+            ret.update(objectives.compute_irtr(self, batch))
 
         return ret

@@ -1,7 +1,6 @@
 import pickle
 import os
 import random
-random.seed(1234)
 from PIL import Image
 import torch
 from torch.utils.data import Dataset
@@ -25,12 +24,6 @@ ruler.add_patterns([{"label": "ING", "pattern": "pork"}])
 ruler.add_patterns([{"label": "ING", "pattern": "beef"}])
 ruler.add_patterns([{"label": "ING", "pattern": "ingredients"}])
 valid_ingredient = pickle.load(open('/data/s2478846/data/valid_ingredients.pkl','rb'))
-
-invisible_ing = ['salt', 'sugar', 'vinegar', 'pepper', 'powder', 'butter', 'flour', 
-                 'sauce', 'cumin', 'spice', 'oregano', 'rosemary','thyme',
-                 'flakes', 'nutmeg', 'cayenne', 'cinnamon', 'cloves','garlic',
-                 'ginger', 'paprika', 'rub', 'blend', 'hickory', 'hanout', 'extract'
-                 'tamari', 'mesquite', 'seasoning']
 
 cooking_verbs = ['add','bake', 'barbecue', 'baste', 'beat', 'blanch', 'blend', 'bring',
                  'boil', 'braise', 'bread', 'break','broil', 'brown','brush', 'candy', 'can', 
@@ -111,7 +104,6 @@ class Recipe1MDataset(Dataset):
         self.max_text_len = max_text_len
         self.max_ingrs = 20
         self.max_instrs = 20
-        self.max_sents = 15
         self.image_only = image_only
         
         self.transforms = keys_to_transforms(transforms, size=image_size)
@@ -120,79 +112,59 @@ class Recipe1MDataset(Dataset):
 
         self.ids = list(self.data.keys())
         self.index_mapper = dict()
-        self.img_names = list()
         
         if self.split=='train' and not self.image_only:
-            j=0
-            for i, id in enumerate(self.ids):
-                img_list = self.data[id]['images']
-                if len(img_list)<=5:
-                    for _j in range(len(img_list)):
-                        self.img_names.append(img_list[_j])
-                        self.index_mapper[j]= (i, _j)
-                        j += 1
-                else:
-                    # random choose 5 images when # images > 5
-                    # random_idx = random.sample([n for n in range(len(img_list))], 5)
-                    random_choie = random.sample(img_list, 5)
-                    for img in random_choie:
-                        self.img_names.append(img)
-                        self.index_mapper[j] = (i, img_list.index(img))
-                        j += 1
+            # self.sample = random.sample(self.ids, 100000)
+            self.sample = self.ids
         else:
             # random select 1000 subset from val/test set
-            j = 0
-            self.random_sample = random.sample(self.ids, 1000)
-            for i, id in enumerate(self.random_sample):
-                img_list = self.data[id]['images']
-                # random choice one image
-                random_choice = random.choice(img_list)
-                self.img_names.append(random_choice)
-                self.index_mapper[j] = (i, img_list.index(random_choice))
-                j += 1
-                       
+            self.sample = random.sample(self.ids, 1000)
+            
+        for i, id in enumerate(self.sample):
+            # random choice one image
+            img = random.choice(self.data[id]['images'])
+            self.index_mapper[i] = (id, img)
+                
     def __len__(self):
         return len(self.index_mapper)
     
     
-    def get_raw_image(self, index):
-        _, img_index = self.index_mapper[index]
-        
-        img_name = self.img_names[img_index]
+    def get_raw_image(self, img_name):
         
         img_name = '/'.join(img_name[:4])+'/'+img_name
         img = Image.open(os.path.join(self.root, self.split, img_name))
 
         return img
     
-    def get_image(self, index):
-        image = self.get_raw_image(index)
+    def get_image(self, img_name):
+        image = self.get_raw_image(img_name)
         image_tensor = [tr(image) for tr in self.transforms]
         
         return {
+            "img_name": img_name,
             "image": image_tensor,
-            "img_index": self.index_mapper[index][1],
-            "id_index": self.index_mapper[index][0],
-            "raw_index": index,
+            # "img_index": self.index_mapper[index][1],
+            # "id_index": self.index_mapper[index][0],
+            # "raw_index": index,
         }
         
-    def get_false_image(self, rep):
-        random_index = random.randint(0, len(self.index_mapper) - 1)
-        image = self.get_raw_image(random_index)
+    def get_false_image(self, rep_id, i):
+        ids_copy = self.sample.copy()
+        ids_copy.remove(rep_id)
+        neg_rep_id = random.choice(ids_copy)
+        entry = self.data[neg_rep_id]
+        img_name = random.choice(entry['images'])
+        # random_index = random.randint(0, len(self.index_mapper) - 1)
+        
+        image = self.get_raw_image(img_name)
         image_tensor = [tr(image) for tr in self.transforms]
-        return {f"false_image_{rep}": image_tensor}
+        
+        return {f"false_image_{i}": image_tensor}
 
 
-    def get_text(self, index):
+    def get_text(self, rep_id):
         
-        id_index, img_index = self.index_mapper[index]
-        
-        if self.split !='train':
-            rep_id = self.random_sample[id_index]
-            entry = self.data[rep_id]
-        else:
-            rep_id = self.ids[id_index]
-            entry = self.data[rep_id]
+        entry = self.data[rep_id]
         
         title = entry['title']
         ingrs = entry['ingredients'][:self.max_ingrs]
@@ -209,7 +181,7 @@ class Recipe1MDataset(Dataset):
         else:
             text.extend(ingrs)
             
-        txt = ' '.join(text[:self.max_sents])      
+        txt = ' '.join(text)      
 
         encoding = self.tokenizer(
             txt,
@@ -219,23 +191,19 @@ class Recipe1MDataset(Dataset):
             return_special_tokens_mask=True,
         )
         return {
+            "rep_id": rep_id,
             "text": (text, encoding),
-            "img_index": img_index,
-            "id_index": id_index,
-            "raw_index": index,
+            # "img_index": img_index,
+            # "id_index": id_index,
+            # "raw_index": index,
         }
 
-    def get_false_text(self, rep):
-        random_index = random.randint(0, len(self.index_mapper) - 1)
+    def get_false_text(self, rep_id, i):
+        ids_copy = self.sample.copy()
+        ids_copy.remove(rep_id)
 
-        id_index, _ = self.index_mapper[random_index]
-        
-        if self.split !='train':
-            rep_id = self.random_sample[id_index]
-            entry = self.data[rep_id]
-        else:
-            rep_id = self.ids[id_index]
-            entry = self.data[rep_id]
+        neg_rep_id = random.choice(ids_copy)
+        entry = self.data[neg_rep_id]
             
         title = entry['title']
         ingrs = entry['ingredients'][:self.max_ingrs]
@@ -252,7 +220,7 @@ class Recipe1MDataset(Dataset):
         else:
             text.extend(ingrs)
             
-        txt = ' '.join(text[:self.max_sents])      
+        txt = ' '.join(text)      
 
         encoding = self.tokenizer(
             txt,
@@ -261,25 +229,27 @@ class Recipe1MDataset(Dataset):
             max_length=self.max_text_len,
             return_special_tokens_mask=True,
         )
-        return {f"false_text_{rep}": (text, encoding)}
+        return {f"false_text_{i}": (text, encoding)}
 
     def __getitem__(self, index):
         result = None
+        rep_id, img_name = self.index_mapper[index]
         while result is None:
             try:
                 ret = dict()
-                ret.update(self.get_image(index))
+                ret['raw_index'] = index
+                ret.update(self.get_image(img_name))
                 # print('image ok')
                 if not self.image_only:
-                    txt = self.get_text(index)
+                    txt = self.get_text(rep_id)
                     # print('text ok')
-                    ret.update({"replica": True if txt["img_index"] > 0 else False})
+                    # ret.update({"replica": True if txt["img_index"] > 0 else False})
                     ret.update(txt)
                 
                 for i in range(self.draw_false_image):
-                    ret.update(self.get_false_image(i))
+                    ret.update(self.get_false_image(rep_id, i))
                 for i in range(self.draw_false_text):
-                    ret.update(self.get_false_text(i))
+                    ret.update(self.get_false_text(rep_id, i))
                 result = True
             except Exception as e:
                 print(f"Error while read file idx {index} in dataset -> {e}")

@@ -1,6 +1,6 @@
 import os
 import copy
-import torch
+import random
 import pytorch_lightning as pl
 from config import ex
 from modules.vilt_module import ViLTransformerSS
@@ -8,31 +8,22 @@ from datamodule import Recipe1MDataModule
 import torch.multiprocessing as mp
 import torch.distributed as dist
 
-
-# def ddp_setup(rank, world_size):
-os.environ['MASTER_ADDR'] = 'localhost'
-os.environ['MASTER_PORT'] = '12355'
-# os.environ['WORLD_SIZE'] = torch.cuda.device_count()
-# dist.init_process_group(backend='nccl', init_method="env://")
-
-def init_process_group(rank, world_size):
-    dist.init_process_group(
-        backend='nccl',
-        # init_method='env://',
-        rank=rank,
-        world_size=world_size
-    )
-
-
 @ex.automain
 def main(_config):
-    # ddp_setup(rank, world_size)
+    
+    random_num = str(random.randint(12345,12399))
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = random_num
+
     _config = copy.deepcopy(_config)
     pl.seed_everything(_config["seed"])
 
     dm = Recipe1MDataModule(_config, dist=True)
     model = ViLTransformerSS(_config)
+    
     exp_name = f'{_config["exp_name"]}'
+    
+    print(_config)
 
     os.makedirs(_config["log_dir"], exist_ok=True)
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
@@ -62,10 +53,15 @@ def main(_config):
 
     max_steps = _config["max_steps"] if _config["max_steps"] is not None else None
 
+    print("num_gpus: {}".format(num_gpus))
+    print("grad_steps: {}".format(grad_steps))
+    print("max_steps: {}".format(max_steps))
+
     trainer = pl.Trainer(
         gpus=_config["num_gpus"],
         num_nodes=_config["num_nodes"],
         precision=_config["precision"],
+        # distributed_backend = "ddp",
         accelerator="ddp",
         benchmark=True,
         deterministic=True,
@@ -82,9 +78,12 @@ def main(_config):
         weights_summary="top",
         fast_dev_run=_config["fast_dev_run"],
         val_check_interval=_config["val_check_interval"],
-    )
-    
-    init_process_group(trainer.global_rank, trainer.world_size)
+        # check_val_every_n_epoch = _config["check_val_every_n_epoch"],
+        num_sanity_val_steps = 0,
+        # limit_train_batches = 5,
+    ) 
+
+    dist.init_process_group(backend='nccl', rank=trainer.local_rank, world_size=trainer.world_size)
 
     if not _config["test_only"]:
         trainer.fit(model, datamodule=dm)
@@ -92,7 +91,4 @@ def main(_config):
         trainer.test(model, datamodule=dm)
         
     dist.destroy_process_group()
-
-# if __name__ == "__main__":
-#     world_size = torch.cuda.device_count()
-#     mp.spawn(main, args=(world_size), nprocs=world_size, join=True)
+        

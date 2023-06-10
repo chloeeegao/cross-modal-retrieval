@@ -228,6 +228,7 @@ class ViLTransformerSS(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         vilt_utils.set_task(self)
         output = self(batch)
+        return output
 
     def validation_epoch_end(self, outs):
         vilt_utils.epoch_wrapup(self)
