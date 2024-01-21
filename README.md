@@ -1,6 +1,6 @@
 ### Cross-Modal Food Retrieval
 
-This is a master thesis.  Recipe1M dataset was used in this work.
+This is my master thesis project. Recipe1M dataset was used in this work. Written report can be found here: https://theses.liacs.nl/pdf/2022-2023-GaoYaqiong.pdf 
 
 ---
 
