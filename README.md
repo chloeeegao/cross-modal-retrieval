@@ -1,4 +1,4 @@
-#### Cross-Modal Food Retrieval
+### Cross-Modal Food Retrieval
 
 This is my master thesis project. Written report can be found here: https://theses.liacs.nl/pdf/2022-2023-GaoYaqiong.pdf 
 Recipe1M dataset was used in this work.
@@ -27,7 +27,7 @@ This repository is organized as follows:
   * fine_tune: two VLP models ([Oscar](https://github.com/microsoft/Oscar) and [ViLT](https://github.com/dandelin/ViLT)) are fine-tuned on Recipe1M
   * recipevl:  recipe vision-language (RecipeVL)  model is trained from scratch
 
-##### Data Preparation
+#### Data Preparation
 
 run scripts under preprocessing
 
@@ -35,6 +35,6 @@ run scripts under preprocessing
 * run `python bigrams.py --no_create` will create class labels from food101 categories and top bigrams; then classes1M.pkl file will be created and used later
 * run `python preprocessing.py --root DATASET_PATH `will create a folder `/traindata` which contains data for training
 
-##### Training/Evaluation
+#### Training/Evaluation
 
 Under each folder there is a `run.sh` script including training parameters, run `sh run.sh` in terminal window to train and evaluate the model.
